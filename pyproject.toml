@@ -1,0 +1,56 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nodescope"
+version = "1.1.0"
+description = "订阅节点批量测速工具（延迟、下载速度、落地检测与 Web 可视化）"
+readme = "README.md"
+requires-python = ">=3.8"
+license = { text = "MIT" }
+authors = [{ name = "ccc6yj" }]
+dependencies = [
+    "requests>=2.28",
+    "PySocks>=1.7.1",
+    "PyYAML>=6.0",
+    "rich>=13.0",
+]
+
+[project.scripts]
+nodescope = "run:main"
+
+[tool.setuptools]
+# run.py 是 CLI 入口但位于仓库根目录，不在包内；
+# 不显式声明 py-modules 的话安装后 console script 会 ModuleNotFoundError: No module named 'run'
+py-modules = ["run"]
+
+[tool.setuptools.packages.find]
+include = ["nodescope*"]
+
+[tool.setuptools.package-data]
+# Web 界面 HTML 与解锁平台图标，漏配会导致安装后 / 返回 404、图标裂图
+nodescope = ["static/*.html", "static/icons/*.svg"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py38"
+
+[tool.ruff.lint]
+# E/W: pycodestyle, F: pyflakes, I: isort, B: bugbear, SIM: simplify, C4: comprehensions
+select = ["E", "W", "F", "I", "B", "SIM", "C4"]
+# 代码里刻意用宽泛 except 兜底（测速/网络场景不应因单点异常中断整场），
+# 已在关键位置加 noqa 注释说明，这里不再重复报 BLE001。
+ignore = [
+    "E501",   # 行长由 line-length 控制，中文注释按字符数易超限
+    "B008",   # 函数默认值调用（argparse 等惯用法）
+]
+
+[tool.ruff.lint.per-file-ignores]
+# 测试与测试辅助脚本允许宽松写法
+"tests/*" = ["B", "SIM"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+

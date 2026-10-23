@@ -1,0 +1,4 @@
+# Windows 脚本必须是 CRLF，shell 脚本必须是 LF，避免跨平台检出后无法运行
+*.bat text eol=crlf
+*.ps1 text eol=crlf
+*.sh  text eol=lf

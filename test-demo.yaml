@@ -1,0 +1,18 @@
+proxies:
+  - name: 本地测试节点-01 (可用)
+    type: socks5
+    server: 127.0.0.1
+    port: 31111
+    udp: true
+
+  - name: 本地测试节点-02 (可用)
+    type: socks5
+    server: 127.0.0.1
+    port: 31111
+    udp: true
+
+  - name: 故障测试节点-03 (模拟超时)
+    type: socks5
+    server: 127.0.0.1
+    port: 19999
+    udp: true

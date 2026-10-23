@@ -1,0 +1,1386 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>节点测速</title>
+<style>
+  /* ---------- 设计令牌：整页统一底色，区域靠细线区分 ---------- */
+  :root {
+    --bg: #F2F4F3;
+    --field: #FBFCFB;
+    --ink: #18211F;
+    --ink-2: #4D5956;
+    --ink-3: #87918E;
+    --rule: #D6DCD9;
+    --rule-2: #E4E8E6;
+    --hover: rgba(24, 33, 31, .035);
+    --accent: #2E43D1;
+    --accent-ink: #FFFFFF;
+    --accent-soft: rgba(46, 67, 209, .08);
+    --good: #12805F;
+    --mid: #B26B12;
+    --bad: #C43D2B;
+    --track: #E1E6E4;
+    --tip-bg: #18211F;
+    --tip-ink: #F2F4F3;
+    /* 只用系统字体，不加载任何外部字体：数字用系统自带的 DIN 风格窄体
+       （macOS: DIN Alternate，Windows: Bahnschrift），缺失时退回系统 UI 字体 */
+    --num: "DIN Alternate", "Bahnschrift", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC", sans-serif;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+    color-scheme: light;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #131918; --field: #182020; --ink: #E3E9E7; --ink-2: #A7B2AF; --ink-3: #6C7875;
+      --rule: #2A3432; --rule-2: #212A28; --hover: rgba(227, 233, 231, .04);
+      --accent: #8595FF; --accent-ink: #10152E; --accent-soft: rgba(133, 149, 255, .12);
+      --good: #4CC59A; --mid: #E2A64C; --bad: #F07A68; --track: #243030;
+      --tip-bg: #E3E9E7; --tip-ink: #131918;
+      color-scheme: dark;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #131918; --field: #182020; --ink: #E3E9E7; --ink-2: #A7B2AF; --ink-3: #6C7875;
+    --rule: #2A3432; --rule-2: #212A28; --hover: rgba(227, 233, 231, .04);
+    --accent: #8595FF; --accent-ink: #10152E; --accent-soft: rgba(133, 149, 255, .12);
+    --good: #4CC59A; --mid: #E2A64C; --bad: #F07A68; --track: #243030;
+    --tip-bg: #E3E9E7; --tip-ink: #131918;
+    color-scheme: dark;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; }
+  body {
+    font-family: var(--sans); font-size: 14px; line-height: 1.5;
+    background: var(--bg); color: var(--ink); overflow: hidden;
+    -webkit-font-smoothing: antialiased;
+  }
+  /* 整页固定一屏，超出的内容只在各自区域内滚动 */
+  .app {
+    height: 100vh; height: 100dvh; max-width: 1280px; margin: 0 auto;
+    display: flex; flex-direction: column; padding: 32px 32px 16px;
+  }
+  /* 首页与结果页两个视图，同一时刻只显示一个 */
+  .view { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+  body[data-view="home"] #results, body[data-view="results"] #home { display: none; }
+  button, input, select { font: inherit; color: inherit; }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+  .btn {
+    border: 1px solid transparent; border-radius: 8px; padding: 0 22px; height: 44px;
+    font-size: 14px; font-weight: 600; cursor: pointer; white-space: nowrap;
+    background: var(--accent); color: var(--accent-ink);
+    transition: background-color .15s, border-color .15s, color .15s, opacity .15s;
+  }
+  .btn:hover { filter: brightness(1.08); }
+  .btn.stop { background: var(--bad); color: #fff; }
+  .btn.ghost {
+    background: transparent; border-color: var(--rule); color: var(--ink-2);
+    height: 34px; padding: 0 14px; font-size: 13px; font-weight: 500;
+  }
+  .btn.ghost:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); filter: none; }
+  .btn:disabled { opacity: .45; cursor: not-allowed; }
+
+  /* ---------- 首页 ---------- */
+  .home-head { display: flex; align-items: baseline; gap: 16px; flex-wrap: wrap; }
+  h1 { font-size: 22px; font-weight: 600; letter-spacing: .5px; }
+  .subtitle { color: var(--ink-3); font-size: 13px; }
+
+  .input-row { display: flex; gap: 10px; margin-top: 22px; }
+  #src {
+    flex: 1; min-width: 0; background: var(--field); border: 1px solid var(--rule);
+    border-radius: 8px; padding: 12px 16px; font-size: 14px; outline: none;
+    transition: border-color .15s, box-shadow .15s;
+  }
+  #src::placeholder { color: var(--ink-3); }
+  #src:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+  #go { min-width: 112px; }
+
+  /* 选项：分段按钮组 */
+  .opts {
+    display: flex; flex-wrap: wrap; align-items: center; gap: 14px 28px;
+    margin-top: 16px; font-size: 13px; color: var(--ink-2);
+  }
+  .opt { display: flex; align-items: center; gap: 10px; border: 0; }
+  .opt > span:first-child { color: var(--ink-3); white-space: nowrap; }
+  fieldset.speed-opts { display: contents; border: 0; }
+  fieldset.speed-opts:disabled .opt { opacity: .4; }
+  fieldset.speed-opts:disabled .seg label { cursor: not-allowed; }
+  .seg { display: inline-flex; border: 1px solid var(--rule); border-radius: 8px; padding: 2px; background: var(--field); }
+  .seg label { position: relative; cursor: pointer; }
+  .seg input { position: absolute; opacity: 0; pointer-events: none; }
+  .seg span {
+    display: block; padding: 4px 11px; border-radius: 6px; white-space: nowrap;
+    font-variant-numeric: tabular-nums; transition: background-color .12s, color .12s;
+  }
+  .seg label:hover span { color: var(--ink); }
+  .seg input:checked + span { background: var(--ink); color: var(--bg); }
+  .seg input:focus-visible + span { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .check { display: inline-flex; align-items: center; gap: 7px; cursor: pointer; color: var(--ink-2); }
+  .check input { accent-color: var(--accent); width: 15px; height: 15px; }
+
+  /* 引导区：最近测过 + 说明，内容多时只在区内滚动 */
+  .intro {
+    flex: 1; min-height: 0; overflow: auto; margin-top: 40px; padding-bottom: 8px;
+    display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr); gap: 56px; align-content: start;
+  }
+  .intro h2 { font-size: 13px; font-weight: 500; color: var(--ink-3); margin-bottom: 10px; }
+  .recent-none { font-size: 13px; color: var(--ink-3); padding: 12px 0; border-top: 1px solid var(--rule); }
+  .recent-list { display: flex; flex-direction: column; border-top: 1px solid var(--rule); }
+  .recent-item {
+    display: grid; grid-template-columns: 1fr auto auto; align-items: center; gap: 16px;
+    border-bottom: 1px solid var(--rule-2); padding: 0 4px 0 0;
+  }
+  .recent-item:hover { background: var(--hover); }
+  .recent-item.selected { box-shadow: inset 3px 0 0 var(--accent); background: var(--accent-soft); }
+  .recent-item.selected .recent-src { color: var(--accent); }
+  .recent-fill {
+    all: unset; cursor: pointer; padding: 10px 4px; min-width: 0;
+    display: flex; align-items: baseline; gap: 12px;
+  }
+  .recent-fill:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+  .recent-src { font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .recent-meta { font-size: 12.5px; color: var(--ink-3); white-space: nowrap; font-variant-numeric: tabular-nums; }
+  .recent-ok { font-family: var(--num); font-size: 14px; font-weight: 600; color: var(--good); white-space: nowrap; }
+  .recent-del {
+    all: unset; cursor: pointer; color: var(--ink-3); width: 26px; height: 26px; border-radius: 6px;
+    display: grid; place-items: center; font-size: 15px;
+  }
+  .recent-del:hover { color: var(--bad); background: var(--hover); }
+  .recent-del:focus-visible { outline: 2px solid var(--accent); }
+
+
+  /* ---------- 结果页 ---------- */
+  .res-head { display: flex; align-items: center; gap: 14px; }
+  .back {
+    all: unset; flex: none; display: inline-flex; align-items: center; gap: 6px;
+    height: 36px; padding: 0 14px 0 10px; border: 1px solid var(--rule); border-radius: 8px;
+    color: var(--ink-2); font-size: 13px; cursor: pointer; transition: border-color .15s, color .15s;
+  }
+  .back:hover { border-color: var(--accent); color: var(--accent); }
+  .back:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .back svg { width: 14px; height: 14px; }
+  .res-title { flex: 1; min-width: 0; display: flex; align-items: baseline; gap: 14px; }
+  .res-title h1 { font-size: 20px; white-space: nowrap; }
+  .res-src { color: var(--ink-3); font-size: 13px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #runBtn { height: 36px; min-width: 104px; padding: 0 18px; }
+
+  /* 进度线 */
+  .bar { flex: none; height: 2px; margin-top: 18px; background: var(--rule-2); overflow: hidden; }
+  .bar-fill { height: 100%; width: 0; background: var(--accent); transition: width .3s ease-out; }
+
+  /* 汇总：一行读数，竖线分隔 */
+  .stats { flex: none; display: flex; flex-wrap: wrap; row-gap: 12px; margin-top: 20px; }
+  .stat { padding: 0 26px; border-left: 1px solid var(--rule); }
+  .stat:first-child { padding-left: 0; border-left: 0; }
+  .stat-num {
+    font-family: var(--num); font-size: 26px; font-weight: 600; line-height: 1.1;
+    font-variant-numeric: tabular-nums; letter-spacing: -.2px;
+  }
+  .stat-num small { font-size: 13px; font-weight: 500; color: var(--ink-3); margin-left: 3px; letter-spacing: 0; }
+  .stat-num.good { color: var(--good); }
+  .stat-num.bad { color: var(--bad); }
+  .stat-label { color: var(--ink-3); font-size: 12.5px; margin-top: 2px; }
+
+  /* 表格工具栏：左侧进度文字，右侧筛选、提示与导出 */
+  .toolbar {
+    flex: none; display: flex; align-items: center; flex-wrap: wrap; gap: 10px 16px;
+    margin-top: 22px; padding-bottom: 12px;
+  }
+  .progress-info { flex: 1 1 260px; min-width: 0; display: flex; align-items: baseline; gap: 14px; font-size: 12.5px; color: var(--ink-3); }
+  #progressText { color: var(--ink-2); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #progressCount { font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .tools { display: flex; align-items: center; gap: 8px; }
+  .filter-box {
+    background: var(--field); border: 1px solid var(--rule); border-radius: 8px;
+    padding: 0 12px; height: 34px; font-size: 13px; width: 240px; outline: none;
+    transition: border-color .15s, box-shadow .15s;
+  }
+  .filter-box::placeholder { color: var(--ink-3); }
+  .filter-box:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+
+  /* 提示浮层：订阅流量、带宽基线、警告等收在这里，按钮颜色取最严重的一级 */
+  .pop { position: relative; flex: none; }
+  .pop > summary { list-style: none; }
+  .pop > summary::-webkit-details-marker { display: none; }
+  .pop-btn {
+    display: inline-flex; align-items: center; gap: 6px; height: 34px; padding: 0 12px;
+    border: 1px solid var(--rule); border-radius: 8px; color: var(--ink-2);
+    font-size: 13px; cursor: pointer; white-space: nowrap; user-select: none;
+    transition: border-color .15s, color .15s;
+  }
+  .pop-btn:hover, .pop[open] > .pop-btn { border-color: var(--accent); color: var(--ink); }
+  .pop-btn b { font-family: var(--num); font-weight: 600; }
+  .pop-btn.warn { color: var(--mid); border-color: color-mix(in srgb, var(--mid) 45%, transparent); }
+  .pop-btn.err { color: var(--bad); border-color: color-mix(in srgb, var(--bad) 45%, transparent); }
+  .pop-panel {
+    position: absolute; top: calc(100% + 6px); right: 0; z-index: 30;
+    background: var(--bg); border: 1px solid var(--rule); border-radius: 10px;
+    box-shadow: 0 10px 30px rgba(0, 0, 0, .14); padding: 12px;
+  }
+  .notes { display: flex; flex-direction: column; gap: 6px; width: min(440px, calc(100vw - 32px)); max-height: 50vh; overflow: auto; }
+  .chip {
+    font-size: 12.5px; padding: 5px 10px; border-radius: 6px; line-height: 1.45;
+    border: 1px solid var(--rule); color: var(--ink-2); white-space: pre-wrap; word-break: break-word;
+  }
+  .chip.warn { color: var(--mid); border-color: color-mix(in srgb, var(--mid) 35%, transparent); }
+  .chip.err  { color: var(--bad); border-color: color-mix(in srgb, var(--bad) 35%, transparent); }
+  .chip.good { color: var(--good); border-color: color-mix(in srgb, var(--good) 35%, transparent); }
+
+  /* ---------- 结果表：占满剩余高度，在面板内滚动，表头相对面板吸顶 ---------- */
+  .table-panel { flex: 1; min-height: 0; overflow: auto; border-top: 1px solid var(--ink); }
+  table { width: 100%; border-collapse: collapse; font-size: 13.5px; --max: 1; }
+  thead th {
+    text-align: left; padding: 10px 12px; color: var(--ink-3); font-weight: 500;
+    font-size: 12.5px; cursor: pointer; user-select: none; white-space: nowrap;
+    background: var(--bg); position: sticky; top: 0; z-index: 2;
+    /* 合并边框模式下 sticky 单元格的 border 会随内容滚走，用内阴影画底线 */
+    box-shadow: inset 0 -1px 0 var(--rule);
+  }
+  thead th:hover { color: var(--ink); }
+  th .arrow { font-size: 9px; margin-left: 4px; color: var(--accent); vertical-align: 1px; }
+  tbody td { padding: 9px 12px; border-bottom: 1px solid var(--rule-2); vertical-align: middle; }
+  tbody tr:hover td { background: var(--hover); }
+  tr.pending td { color: var(--ink-3); }
+  tr.node-failed td { color: var(--ink-3); }
+  tr.node-failed td.name { color: var(--ink-2); text-decoration: line-through; text-decoration-color: var(--rule); }
+  tr.testing-node td { background: var(--accent-soft); }
+  tr.testing-node td:first-child { box-shadow: inset 3px 0 0 var(--accent); }
+
+  .num { font-variant-numeric: tabular-nums; }
+  .dim { color: var(--ink-3); }
+  .rank { color: var(--ink-3); width: 36px; font-size: 12.5px; }
+  .name { font-weight: 500; max-width: 300px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .type { color: var(--ink-2); font-size: 12.5px; }
+  .country { font-weight: 500; font-size: 13px; }
+
+  /* 延迟：着色数字 */
+  .lat { font-family: var(--num); font-size: 15px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .lat small { font-family: var(--sans); font-size: 11px; font-weight: 400; color: var(--ink-3); margin-left: 2px; }
+  .t-good { color: var(--good); } .t-mid { color: var(--mid); } .t-bad { color: var(--bad); }
+
+  /* 速度：数值 + 按全场最快值归一化的横条（本页的主视觉） */
+  .speed-cell { min-width: 240px; }
+  .spd { display: grid; grid-template-columns: 3.6em 1fr; align-items: center; column-gap: 10px; }
+  .spd-num {
+    font-family: var(--num); font-size: 15px; font-weight: 600; text-align: right;
+    font-variant-numeric: tabular-nums; color: var(--ink);
+  }
+  .spd-track { position: relative; height: 8px; background: var(--track); border-radius: 2px; overflow: hidden; }
+  .spd-track i {
+    position: absolute; inset: 0 auto 0 0; border-radius: 2px;
+    width: min(100%, calc(var(--v) / var(--max) * 100%));
+    background: var(--ink-3); transition: width .35s ease-out;
+  }
+  .spd.t-good .spd-track i { background: var(--good); }
+  .spd.t-mid .spd-track i { background: var(--mid); }
+  .spd.t-bad .spd-track i { background: var(--bad); }
+  .spd.live .spd-num { color: var(--accent); }
+  .spd.live .spd-track i { background: var(--accent); transition-duration: .2s; }
+  .spd-meta { grid-column: 2; font-size: 11px; color: var(--ink-3); line-height: 1.2; margin-top: 3px; }
+
+  /* 状态：圆点 + 文字 */
+  .st { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; white-space: nowrap; }
+  .st::before { content: ''; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+  .st-ok { color: var(--good); }
+  .st-bad { color: var(--bad); }
+  .st-wait { color: var(--ink-3); }
+  .st-wait::before { background: transparent; border: 1px solid currentColor; }
+  .st-run { color: var(--accent); font-weight: 500; }
+  .st-run::before { display: none; }
+
+  .error { color: var(--bad); font-size: 12px; max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  tr.node-failed td .error { color: var(--ink-3); margin-top: 1px; line-height: 1.3; cursor: help; }
+  .spd-fail { color: var(--mid); font-size: 12.5px; cursor: help; }
+  .empty { text-align: center; color: var(--ink-3); padding: 34px 16px; font-size: 13.5px; white-space: pre-wrap; }
+  .empty.err { color: var(--bad); }
+  .spin {
+    display: inline-block; width: 11px; height: 11px; border: 1.5px solid var(--rule);
+    border-top-color: var(--accent); border-radius: 50%; animation: r .7s linear infinite;
+  }
+  @keyframes r { to { transform: rotate(360deg); } }
+
+  /* 解锁平台图标 */
+  .unlock-icons { display: inline-flex; align-items: center; gap: 5px; vertical-align: middle; flex-wrap: nowrap; }
+  .icon-badge {
+    display: inline-flex; align-items: center; justify-content: center; padding: 2px;
+    border-radius: 5px; background: #fff; box-shadow: 0 0 0 1px var(--rule-2);
+    cursor: default; transition: transform .12s ease;
+  }
+  .icon-badge:hover { transform: scale(1.18); z-index: 10; }
+  .icon-badge img { display: block; width: 16px; height: 16px; object-fit: contain; }
+
+  /* 悬停提示 */
+  [data-tip] { position: relative; cursor: default; }
+  [data-tip]::after {
+    content: attr(data-tip); position: absolute; bottom: calc(100% + 6px); left: 50%;
+    transform: translateX(-50%) translateY(2px); background: var(--tip-bg); color: var(--tip-ink);
+    padding: 4px 8px; border-radius: 5px; font: 500 11.5px/1.35 var(--sans);
+    white-space: nowrap; pointer-events: none; opacity: 0; visibility: hidden;
+    transition: opacity .08s ease, transform .08s ease; z-index: 9999;
+  }
+  [data-tip]:hover::after { opacity: 1; visibility: visible; transform: translateX(-50%) translateY(0); }
+
+  @media (max-width: 900px) {
+    .intro { grid-template-columns: 1fr; gap: 32px; }
+  }
+  @media (max-width: 720px) {
+    .app { padding: 20px 16px 10px; }
+    .input-row { flex-direction: column; }
+    #go { width: 100%; }
+    .intro { margin-top: 28px; }
+    .recent-meta { display: none; }
+    .res-title h1 { font-size: 17px; }
+    .stat { padding: 0 14px; }
+    .stat-num { font-size: 20px; }
+    .tools { width: 100%; }
+    .filter-box { flex: 1; width: auto; min-width: 0; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { transition: none !important; animation-duration: 1.5s !important; }
+  }
+
+  /* ---------- 首页补充：结果预览、测试流程、解锁平台、支持格式 ---------- */
+  .intro-col { display: flex; flex-direction: column; gap: 32px; min-width: 0; }
+  .sample { border-top: 1px solid var(--ink); pointer-events: none; user-select: none; overflow: hidden; }
+  .sample table { font-size: 13px; }
+  .sample thead th { cursor: default; background: transparent; position: static; }
+  .sample tbody td { padding: 8px 12px; }
+  .sample .speed-cell { min-width: 180px; }
+  .sample-note { font-size: 12px; color: var(--ink-3); margin-top: 10px; }
+
+  .steps { list-style: none; display: grid; gap: 0; border-top: 1px solid var(--rule); counter-reset: step; }
+  .steps li {
+    counter-increment: step; display: grid; grid-template-columns: 28px 1fr; column-gap: 10px;
+    padding: 10px 0; border-bottom: 1px solid var(--rule-2); font-size: 13px; color: var(--ink-2);
+  }
+  .steps li::before {
+    content: counter(step); font-family: var(--num); font-size: 15px; font-weight: 600;
+    color: var(--accent); line-height: 1.4;
+  }
+  .steps b { color: var(--ink); font-weight: 600; margin-right: 6px; }
+
+  .platforms { display: flex; flex-wrap: wrap; gap: 8px 14px; }
+  .platform { display: inline-flex; align-items: center; gap: 7px; font-size: 12.5px; color: var(--ink-2); }
+  .platform .icon-badge { cursor: default; }
+  .platform .icon-badge:hover { transform: none; }
+
+  .tags { display: flex; flex-wrap: wrap; gap: 6px; }
+  .tag {
+    font-size: 12.5px; padding: 2px 9px; border-radius: 6px;
+    border: 1px solid var(--rule); color: var(--ink-2);
+  }
+
+  /* 结果页盖住首页时的入场过渡 */
+  body[data-view="results"] #results { animation: cover .22s ease-out; }
+  @keyframes cover { from { opacity: 0; transform: translateY(8px); } }
+</style>
+</head>
+<body data-view="home">
+<div class="app">
+  <!-- 首页：输入、选项与引导；开始测速后由结果页整块盖住 -->
+  <section class="view" id="home">
+    <header class="home-head">
+      <h1>节点测速</h1>
+      <p class="subtitle">粘贴机场订阅，逐个测延迟、下载速度与流媒体解锁。数据只在本机处理。</p>
+    </header>
+
+    <div class="input-row">
+      <input id="src" type="text" spellcheck="false" autocomplete="off" aria-label="订阅链接"
+             placeholder="订阅链接（Clash / Base64 / QuantumultX）或节点链接，回车开始">
+      <button class="btn" id="go">开始测速</button>
+    </div>
+
+    <div class="opts">
+      <fieldset class="speed-opts" id="speedOpts">
+        <div class="opt">
+          <span>测速时长</span>
+          <div class="seg" role="radiogroup" aria-label="测速时长">
+            <label><input type="radio" name="speedSeconds" value="3"><span>3 秒</span></label>
+            <label><input type="radio" name="speedSeconds" value="5" checked><span>5 秒</span></label>
+            <label><input type="radio" name="speedSeconds" value="8"><span>8 秒</span></label>
+          </div>
+        </div>
+        <div class="opt" title="按实际传输时间计速；上限低只是提前停止，不会把速度算低">
+          <span>单节点流量</span>
+          <div class="seg" role="radiogroup" aria-label="单节点流量上限">
+            <label><input type="radio" name="maxMb" value=""><span>不限</span></label>
+            <label><input type="radio" name="maxMb" value="10"><span>10 MB</span></label>
+            <label><input type="radio" name="maxMb" value="30" checked><span>30 MB</span></label>
+            <label><input type="radio" name="maxMb" value="80"><span>80 MB</span></label>
+          </div>
+        </div>
+        <div class="opt" title="同时测速的节点数。多个节点同时测会分抢本机带宽，快节点抢得多——所有节点都撞本机带宽上限、看不出差异时用">
+          <span>同时测速</span>
+          <div class="seg" role="radiogroup" aria-label="同时测速的节点数">
+            <label><input type="radio" name="speedConc" value="1" checked><span>1 个</span></label>
+            <label><input type="radio" name="speedConc" value="2"><span>2 个</span></label>
+            <label><input type="radio" name="speedConc" value="4"><span>4 个</span></label>
+          </div>
+        </div>
+      </fieldset>
+      <div class="opt">
+        <span>探活并发</span>
+        <div class="seg" role="radiogroup" aria-label="探活并发">
+          <label><input type="radio" name="concurrency" value="4"><span>4</span></label>
+          <label><input type="radio" name="concurrency" value="8" checked><span>8</span></label>
+          <label><input type="radio" name="concurrency" value="12"><span>12</span></label>
+        </div>
+      </div>
+      <label class="check"><input type="checkbox" id="noSpeed"> 只测延迟</label>
+    </div>
+
+    <div class="intro">
+      <div class="intro-col">
+        <div class="recent" id="recent"></div>
+
+        <div>
+          <h2>结果预览</h2>
+          <div class="sample" aria-hidden="true">
+            <table style="--max:236.8">
+              <thead><tr>
+                <th>#</th><th>节点</th><th>协议</th><th>落地</th><th>延迟</th><th>下载速度 (Mbps)</th><th>状态</th>
+              </tr></thead>
+              <tbody>
+                <tr><td class="rank">1</td><td class="name">香港 IEPL 02</td><td class="type">vless</td><td class="country">HK</td>
+                  <td><span class="lat t-good">46<small>ms</small></span></td>
+                  <td class="speed-cell"><div class="spd t-good" style="--v:236.8"><span class="spd-num">236.8</span><span class="spd-track"><i></i></span></div></td>
+                  <td><span class="st st-ok">可用</span></td></tr>
+                <tr><td class="rank">2</td><td class="name">日本 东京 01</td><td class="type">trojan</td><td class="country">JP</td>
+                  <td><span class="lat t-good">88<small>ms</small></span></td>
+                  <td class="speed-cell"><div class="spd t-good" style="--v:141.2"><span class="spd-num">141.2</span><span class="spd-track"><i></i></span></div></td>
+                  <td><span class="st st-ok">可用</span></td></tr>
+                <tr><td class="rank">3</td><td class="name">美国 洛杉矶</td><td class="type">hysteria2</td><td class="country">US</td>
+                  <td><span class="lat t-mid">352<small>ms</small></span></td>
+                  <td class="speed-cell"><div class="spd t-mid" style="--v:38.5"><span class="spd-num">38.5</span><span class="spd-track"><i></i></span></div></td>
+                  <td><span class="st st-ok">可用</span></td></tr>
+                <tr class="node-failed"><td class="rank">4</td><td class="name">台湾 01</td><td class="type">vmess</td><td><span class="dim">-</span></td>
+                  <td><span class="dim">-</span></td><td class="speed-cell"><span class="dim">-</span></td>
+                  <td><span class="st st-bad">不可用</span><div class="error">TCP 直连失败</div></td></tr>
+              </tbody>
+            </table>
+          </div>
+          <p class="sample-note">示例数据。测试结束后按下载速度排序，点击表头可换排序方式。</p>
+        </div>
+      </div>
+
+      <div class="intro-col">
+        <div>
+          <h2>测试流程</h2>
+          <ol class="steps">
+            <li><span><b>解析订阅</b>多种 UA 各拉一次合并去重，交给 mihomo 内核为每个节点开本地端口。</span></li>
+            <li><span><b>探活</b>按「探活并发」同时测 TCP / HTTP 延迟、落地地区和解锁情况。</span></li>
+            <li><span><b>测速</b>探活通过的节点立即排队下载测速，「同时测速」控制并行数。</span></li>
+            <li><span><b>导出</b>测完可导出可用节点（Clash YAML）或整张结果图。</span></li>
+          </ol>
+        </div>
+
+        <div>
+          <h2>解锁检测</h2>
+          <div class="platforms" id="platforms"></div>
+        </div>
+
+        <div>
+          <h2>支持的格式</h2>
+          <div class="tags">
+            <span class="tag fmt">Clash YAML</span><span class="tag fmt">Base64</span><span class="tag fmt">QuantumultX</span>
+            <span class="tag">ss</span><span class="tag">vmess</span><span class="tag">vless</span><span class="tag">trojan</span>
+            <span class="tag">hy2</span><span class="tag">tuic</span><span class="tag">anytls</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 结果页：测速开始后覆盖首页，表格占满剩余高度 -->
+  <section class="view" id="results">
+    <header class="res-head">
+      <button class="back" id="backBtn" title="返回首页">
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10 3 5 8l5 5"/></svg>
+        返回
+      </button>
+      <div class="res-title">
+        <h1>测试结果</h1>
+        <span class="res-src" id="resSrc"></span>
+      </div>
+      <button class="btn" id="runBtn">停止</button>
+    </header>
+
+    <div class="bar"><div class="bar-fill" id="barFill"></div></div>
+
+    <div class="stats" id="stats"></div>
+
+    <div class="toolbar">
+      <div class="progress-info">
+        <span id="progressText">等待开始…</span>
+        <span id="progressCount"></span>
+      </div>
+      <div class="tools">
+        <input id="filterInput" class="filter-box" type="search" aria-label="筛选节点" placeholder="筛选节点名、落地、协议、解锁平台">
+        <details class="pop" id="notesPop" hidden>
+          <summary class="pop-btn" id="notesBtn">提示 <b id="notesCount">0</b></summary>
+          <div class="pop-panel"><div class="notes" id="chips"></div></div>
+        </details>
+        <button class="btn ghost" id="exportNodesBtn" disabled onclick="exportNodes()">导出可用节点</button>
+        <button class="btn ghost" id="pngBtn" disabled onclick="try{exportPNG()}catch(e){chip('导出失败: '+e.message,'err')}">导出图片</button>
+      </div>
+    </div>
+
+    <div class="table-panel" id="tablePanel">
+      <table id="tbl">
+        <thead><tr></tr></thead>
+        <tbody id="tbody"></tbody>
+      </table>
+      <div class="empty" id="empty"></div>
+    </div>
+  </section>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const val = name => (document.querySelector(`input[name="${name}"]:checked`) || {}).value || '';
+// 导出图片用的字体，与页面的 --sans / --num 保持一致
+const FONT = '-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif';
+const NUM_FONT = '"DIN Alternate","Bahnschrift",-apple-system,"Segoe UI",Roboto,"PingFang SC",sans-serif';
+let es = null, rows = {}, order = [], rawNodes = [], testStart = 0, testElapsed = '', localBW = null;
+// 任务提交中（EventSource 尚未建立）时的中止器：此时点「停止」也必须能停，不能再开一场
+let pendingStart = null;
+
+// 解锁平台图标：来自 walkxcode/dashboard-icons，已下载到 static/icons/ 由本地服务提供，
+// 不依赖 CDN（国内常加载失败、测速时还可能走 TUN），也不向第三方暴露正在测速
+const ICON_BASE = '/icons/';
+const UNLOCK_ICONS = {
+  chatgpt:  { name: 'OpenAI (ChatGPT)', file: 'openai.svg' },
+  claude:   { name: 'Claude (Anthropic)', file: 'claude-ai.svg' },
+  gemini:   { name: 'Google Gemini', file: 'google-gemini.svg' },
+  youtube:  { name: 'YouTube', file: 'youtube.svg' },
+  netflix:  { name: 'Netflix', file: 'netflix.svg' },
+  disney:   { name: 'Disney+', file: 'disney-plus.svg' },
+  tiktok:   { name: 'TikTok', file: 'tiktok.svg' },
+  bilibili: { name: 'B站港澳台限定', file: 'bilibili.svg' },
+};
+
+// 分档阈值：速度（Mbps）越高越好，延迟（ms）越低越好
+const speedTier = v => v >= 50 ? 'good' : v >= 10 ? 'mid' : 'bad';
+const latTier = v => v < 300 ? 'good' : v < 800 ? 'mid' : 'bad';
+
+function renderUnlock(u) {
+  if (!u || typeof u !== 'object') return '<span class="dim">-</span>';
+  const icons = [];
+  for (const [key, item] of Object.entries(UNLOCK_ICONS)) {
+    if (u[key]) {
+      icons.push(`<span class="icon-badge" data-tip="${esc(item.name)}"><img src="${ICON_BASE}${item.file}" width="16" height="16" alt="${esc(item.name)}" loading="lazy"></span>`);
+    }
+  }
+  return icons.length ? `<div class="unlock-icons">${icons.join('')}</div>` : '<span class="dim">-</span>';
+}
+
+function esc(s) {
+  return String(s).replace(/[&<>"']/g,
+    c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+// 本机带宽基线：优先用直连实测值；没测到时，若 ≥3 个节点速度都落在最快值
+// 的 3% 以内，则推断它们撞了本机带宽上限（而非节点真的一样快）
+function effBaseline() {
+  if (localBW) return localBW;
+  const sp = order.map(n => rows[n])
+    .filter(r => r._done && r.speed_mbps != null)
+    .map(r => r.speed_mbps).sort((a, b) => b - a);
+  if (sp.length >= 3 && sp.filter(v => v >= sp[0] * 0.97).length >= 3) return sp[0];
+  return null;
+}
+// 提示收进状态栏的「提示」浮层，按钮颜色取最严重的一级，不占列表空间
+const NOTE_LEVEL = { err: 2, warn: 1 };
+let noteLevel = 0;
+function chip(text, cls) {
+  const el = document.createElement('div');
+  el.className = 'chip' + (cls ? ' ' + cls : '');
+  el.textContent = text;
+  $('chips').appendChild(el);
+  noteLevel = Math.max(noteLevel, NOTE_LEVEL[cls] || 0);
+  $('notesCount').textContent = $('chips').children.length;
+  $('notesBtn').className = 'pop-btn sm' + (noteLevel === 2 ? ' err' : noteLevel === 1 ? ' warn' : '');
+  $('notesPop').hidden = false;
+  // 还没有节点行时（订阅读取失败等），错误直接显示在列表区，免得要点开浮层才看到
+  if (cls === 'err' && !order.length) {
+    $('empty').textContent = text;
+    $('empty').className = 'empty err';
+    $('empty').style.display = 'block';
+  }
+}
+function clearNotes() {
+  $('chips').innerHTML = '';
+  noteLevel = 0;
+  $('notesPop').hidden = true;
+  $('notesPop').open = false;
+}
+/* ---------- 最近测过的订阅（仅存本浏览器 localStorage） ---------- */
+const RECENT_KEY = 'nt-recent-subs';
+const RECENT_MAX = 6;
+let currentSrc = '';
+
+function loadRecent() {
+  try { return JSON.parse(localStorage.getItem(RECENT_KEY)) || []; }
+  catch (e) { return []; }
+}
+function storeRecent(list) {
+  try { localStorage.setItem(RECENT_KEY, JSON.stringify(list)); } catch (e) { /* 隐私模式等不可写时忽略 */ }
+}
+function saveRecent(src, info) {
+  if (!src) return;
+  const list = loadRecent();
+  const old = list.find(x => x.src === src) || {};
+  const item = { ...old, ...info, src, t: Date.now() };
+  // 新一轮开始时旧的可用数已失效，只有 done 时才写入
+  if (!('ok' in info)) delete item.ok;
+  storeRecent([item, ...list.filter(x => x.src !== src)].slice(0, RECENT_MAX));
+}
+// 展示时隐去 token：URL 只露域名和末尾 4 位，粘贴的节点文本只显示行数
+function maskSrc(src) {
+  const lines = src.split(/\s+/).filter(Boolean);
+  if (lines.length > 1) return `${lines.length} 条链接/节点`;
+  try {
+    const u = new URL(src);
+    if (/^https?:$/.test(u.protocol)) {
+      const tail = (u.pathname + u.search).replace(/[^A-Za-z0-9]/g, '').slice(-4);
+      return u.host + (tail ? ` …${tail}` : '');
+    }
+    return `${u.protocol.replace(':', '')} 节点链接`;
+  } catch (e) {
+    return src.length > 24 ? src.slice(0, 12) + '…' + src.slice(-4) : src;
+  }
+}
+function fmtAgo(t) {
+  const m = Math.round((Date.now() - t) / 60000);
+  if (m < 1) return '刚刚';
+  if (m < 60) return `${m} 分钟前`;
+  const h = Math.round(m / 60);
+  if (h < 24) return `${h} 小时前`;
+  return `${Math.round(h / 24)} 天前`;
+}
+// 高亮与输入框内容一致的那条记录
+function markRecentSelected() {
+  const cur = $('src').value.trim();
+  const list = loadRecent();
+  document.querySelectorAll('#recent .recent-item').forEach((el, i) => {
+    el.classList.toggle('selected', !!list[i] && list[i].src === cur);
+  });
+}
+$('src').addEventListener('input', markRecentSelected);
+
+function renderRecent() {
+  const list = loadRecent();
+  if (!list.length) {
+    $('recent').innerHTML = '<h2>最近测过</h2><p class="recent-none">还没有测过的订阅。粘贴订阅链接，回车开始。</p>';
+    return;
+  }
+  $('recent').innerHTML = '<h2>最近测过</h2><div class="recent-list">' + list.map((x, i) =>
+    `<div class="recent-item${x.src === $('src').value.trim() ? ' selected' : ''}">` +
+      `<button class="recent-fill" data-i="${i}" title="填入输入框">` +
+        `<span class="recent-src">${esc(maskSrc(x.src))}</span>` +
+        `<span class="recent-meta">${x.count != null ? x.count + ' 个节点，' : ''}${fmtAgo(x.t)}</span>` +
+      `</button>` +
+      `<span class="recent-ok">${x.ok != null ? x.ok + ' 可用' : ''}</span>` +
+      `<button class="recent-del" data-i="${i}" aria-label="删除这条记录" title="删除这条记录">×</button>` +
+    `</div>`).join('') + '</div>';
+}
+$('recent').addEventListener('click', e => {
+  const btn = e.target.closest('button[data-i]');
+  if (!btn) return;
+  const list = loadRecent();
+  const item = list[+btn.dataset.i];
+  if (!item) return;
+  if (btn.classList.contains('recent-del')) {
+    storeRecent(list.filter(x => x !== item));
+    renderRecent();
+  } else {
+    // 只填入，不直接开测：用户可能想先确认订阅或调整选项
+    $('src').value = item.src;
+    markRecentSelected();
+    $('src').focus();
+  }
+});
+
+function classify(r) {
+  return r.ok ? { text: '可用', cls: 'st-ok' } : { text: '不可用', cls: 'st-bad' };
+}
+// 后端 error 形如「HTTP 测试失败: <异常详情>」：表格里只显示冒号前的概括，完整内容放悬停
+function errBrief(err) {
+  return String(err).split(/[:：]/)[0].trim() || String(err);
+}
+
+function setProgress(done_, total, ok) {
+  const isNoSpeed = $('noSpeed').checked;
+  const probeDone = order.filter(n => rows[n]._done).length;
+  const okTotal = order.filter(n => rows[n].ok).length;
+  const speedDone = order.filter(n => rows[n].ok && rows[n].speed_mbps != null).length;
+
+  if (isNoSpeed) {
+    const pct = total ? (probeDone / total) * 100 : 0;
+    $('barFill').style.width = pct + '%';
+    $('progressCount').textContent = `延迟 ${probeDone}/${total}，可用 ${okTotal}`;
+    if (probeDone >= total && total > 0) $('progressText').textContent = '测试完成';
+  } else {
+    // 测速模式：优先反映可用节点的下载测速完成比例
+    if (probeDone >= total && total > 0 && okTotal === 0) {
+      $('barFill').style.width = '100%';
+      $('progressCount').textContent = `探活 ${total}/${total}，无可用节点`;
+      $('progressText').textContent = '全部节点不可用';
+    } else if (okTotal > 0) {
+      const pct = (speedDone / okTotal) * 100;
+      $('barFill').style.width = pct + '%';
+      $('progressCount').textContent = `测速 ${speedDone}/${okTotal}　探活 ${probeDone}/${total}`;
+      if (speedDone >= okTotal && probeDone >= total) {
+        $('progressText').textContent = '测速全部完成';
+      }
+    } else {
+      const pct = total ? Math.min((probeDone / total) * 15, 15) : 0;
+      $('barFill').style.width = pct + '%';
+      $('progressCount').textContent = `探活 ${probeDone}/${total}`;
+    }
+  }
+}
+
+function updateStats() {
+  const doneList = order.map(n => rows[n]).filter(r => r._done);
+  const ok = doneList.filter(r => r.ok);
+  const speeds = doneList.map(r => r.speed_mbps).filter(v => v != null);
+  const lats = doneList.map(r => r.http_ms).filter(v => v != null);
+  const maxSpeed = speeds.length ? Math.max(...speeds) : 0;
+  // 速度条以全场最快值为满格
+  $('tbl').style.setProperty('--max', maxSpeed || 1);
+  const failed = doneList.length - ok.length;
+  const cards = [
+    ['节点', String(order.length), '', ''],
+    ['可用', String(ok.length), '', 'good'],
+    ['失败', String(failed), '', failed ? 'bad' : ''],
+    ['最快', speeds.length ? maxSpeed.toFixed(1) : '-', speeds.length ? 'Mbps' : '', ''],
+    ['最低延迟', lats.length ? Math.min(...lats).toFixed(0) : '-', lats.length ? 'ms' : '', ''],
+    ['耗时', testElapsed || '测试中', '', ''],
+  ];
+  $('stats').style.display = order.length ? 'flex' : 'none';
+  $('stats').innerHTML = cards.map(([k, v, unit, c]) =>
+    `<div class="stat"><div class="stat-num ${c}">${esc(v)}${unit ? `<small>${unit}</small>` : ''}</div>` +
+    `<div class="stat-label">${k}</div></div>`).join('');
+}
+
+function speedBar(v, cls, meta) {
+  return `<div class="spd ${cls}" style="--v:${v}"><span class="spd-num">${v.toFixed(1)}</span>` +
+    `<span class="spd-track"><i></i></span>${meta || ''}</div>`;
+}
+
+function render(r) {
+  const speed = r.speed_mbps;
+  const bw = effBaseline();
+  const nearLocal = bw && speed != null && speed >= bw * 0.93;
+  const speedCell = speed != null
+    ? speedBar(speed, 't-' + speedTier(speed), nearLocal
+        ? `<span class="spd-meta" title="与本机带宽（${bw.toFixed(1)} Mbps）接近：瓶颈大概率在本机，而非节点差异。可把「同时测速」调到 2 或 4 区分真实快慢">≈ 本机带宽上限</span>`
+        : '')
+    // 可用节点带 error 只可能是测速阶段失败，与「没测速」区分开
+    : (r.ok && r.error)
+      ? `<span class="spd-fail" title="${esc(r.error)}">${esc(errBrief(r.error))}</span>`
+      : '<span class="dim">-</span>';
+
+  const latVal = r.http_ms != null ? r.http_ms : r.tcp_ms;
+  const httpStr = r.http_ms != null ? `HTTP ${r.http_ms.toFixed(0)} ms` : '';
+  const tcpStr = r.tcp_ms != null ? `TCP ${r.tcp_ms.toFixed(0)} ms` : '';
+  const latTip = (httpStr && tcpStr) ? `${httpStr}，${tcpStr}` : (httpStr || tcpStr);
+  const latCell = latVal != null
+    ? `<span class="lat t-${latTier(latVal)}" ${latTip ? `data-tip="${esc(latTip)}"` : ''}>${latVal.toFixed(0)}<small>ms</small></span>`
+    : '<span class="dim">-</span>';
+
+  const st = classify(r);
+  const countryCell = r.country
+    ? `<span class="country">${esc(r.country)}</span>`
+    : '<span class="dim">-</span>';
+  return `<td class="num rank"></td>` +
+    `<td class="name" title="${esc(r.name)}">${esc(r.name)}</td>` +
+    `<td class="type">${esc(r.type || '?')}</td>` +
+    `<td>${countryCell}</td>` +
+    `<td>${renderUnlock(r.unlock)}</td>` +
+    `<td class="num latency-cell">${latCell}</td>` +
+    `<td class="num speed-cell">${speedCell}</td>` +
+    `<td><span class="st ${st.cls}">${st.text}</span>` +
+      (!r.ok && r.error ? `<div class="error" title="${esc(r.error)}">${esc(errBrief(r.error))}</div>` : '') +
+    `</td>`;
+}
+
+function updateRow(name, r) {
+  const row = rows[name];
+  if (!row) return;
+  Object.assign(row, r);
+  row._done = true;
+  const tr = row._tr;
+  tr.classList.remove('pending', 'testing-node');
+  tr.classList.toggle('node-failed', !r.ok);
+  // 测试进行中不重排：每来一条结果就整表重排会让行上下乱跳（正在测的行也跟着跑），
+  // 序号保持原位，等 finishUI() 时统一排序
+  const rank = tr.cells[0] ? tr.cells[0].textContent : '';
+  tr.innerHTML = render(row);
+  tr.cells[0].textContent = rank;
+
+  updateStats();
+  if (order.some(n => rows[n]._done)) {
+    $('pngBtn').disabled = false;
+    if (order.some(n => rows[n]._done && rows[n].ok)) $('exportNodesBtn').disabled = false;
+  }
+}
+
+/* ---------- 排序 ---------- */
+let sortState = { key: null, asc: true };
+
+function updateSortIndicators() {
+  document.querySelectorAll('#tbl thead th .arrow').forEach(a => a.remove());
+  if (!sortState.key) return;
+  const th = document.querySelector(`#tbl thead th[data-k="${sortState.key}"]`);
+  if (th) {
+    const arrow = document.createElement('span');
+    arrow.className = 'arrow';
+    arrow.textContent = sortState.asc ? '▲' : '▼';
+    th.appendChild(arrow);
+  }
+}
+
+function applySort() {
+  if (!sortState.key) return;
+  const tbody = $('tbody');
+  const headers = [...$('tbl').querySelectorAll('thead th')];
+  const rowsArr = [...tbody.rows];
+  const idx = headers.findIndex(th => th.dataset.k === sortState.key);
+  if (idx < 0) return;
+  const numKeys = new Set(['latency', 'tcp', 'http', 'speed', 'rank']);
+
+  function cellVal(tr) {
+    const cell = tr.cells[idx];
+    if (!cell) return null;
+    const text = cell.textContent.trim();
+    if (sortState.key === 'rank') return parseFloat(text) || 0;
+    if (numKeys.has(sortState.key)) {
+      const m = text.match(/[\d.]+/);
+      return m ? parseFloat(m[0]) : null;
+    }
+    if (sortState.key === 'unlock') {
+      return cell.querySelectorAll('.icon-badge').length;
+    }
+    if (sortState.key === 'status') {
+      if (text.includes('不可用') || text.includes('失败')) return 0;
+      if (text.includes('可用')) return 1;
+      return -1;
+    }
+    if (text === '-' || text === '') return null;
+    return text;
+  }
+
+  rowsArr.sort((a, b) => {
+    const va = cellVal(a), vb = cellVal(b);
+    if (va === null && vb === null) return 0;
+    if (va === null) return 1;
+    if (vb === null) return -1;
+    const cmp = (typeof va === 'number' && typeof vb === 'number')
+      ? (sortState.asc ? va - vb : vb - va)
+      : (sortState.asc ? String(va).localeCompare(String(vb), 'zh') : String(vb).localeCompare(String(va), 'zh'));
+    return cmp;
+  });
+  rowsArr.forEach(tr => tbody.appendChild(tr));
+  rowsArr.forEach((tr, i) => {
+    if (tr.cells[0]) tr.cells[0].textContent = i + 1;
+  });
+}
+
+function handleSortClick(k) {
+  if (!k) return;
+  if (sortState.key === k) {
+    sortState.asc = !sortState.asc;
+  } else {
+    sortState.key = k;
+    sortState.asc = !(k === 'speed' || k === 'status' || k === 'unlock');
+  }
+  updateSortIndicators();
+  applySort();
+}
+
+// 使用事件委托，避免 start() 重置 thead 时监听器丢失
+$('tbl').querySelector('thead').addEventListener('click', e => {
+  const th = e.target.closest('th');
+  if (!th || !th.dataset.k) return;
+  handleSortClick(th.dataset.k);
+});
+
+function refreshRanks() {
+  if (sortState.key) { applySort(); return; }
+  const sorted = order.slice().sort((a, b) => rankVal(rows[b]) - rankVal(rows[a]));
+  const tbody = $('tbody');
+  sorted.forEach((name, i) => {
+    tbody.appendChild(rows[name]._tr);
+    rows[name]._tr.querySelector('.rank').textContent = i + 1;
+  });
+}
+function rankVal(r) {
+  if (r.speed_mbps != null) return r.speed_mbps;
+  if (r.http_ms != null) return 0.001 / r.http_ms;
+  return 0;
+}
+
+function renderHead() {
+  $('tbl').querySelector('thead tr').innerHTML = `
+    <th data-k="rank">#</th>
+    <th data-k="name">节点</th>
+    <th data-k="type">协议</th>
+    <th data-k="country">落地</th>
+    <th data-k="unlock">解锁</th>
+    <th data-k="latency" title="经节点的真实端到端延迟（悬停数值可看 TCP 直连入口延迟）">延迟</th>
+    <th data-k="speed">下载速度 (Mbps)</th>
+    <th data-k="status">状态</th>
+  `;
+}
+
+/* ---------- 导出图片 ---------- */
+// 导出图固定用浅色配色，与页面令牌保持一致
+const PNG = {
+  bg: '#F2F4F3', ink: '#18211F', ink2: '#4D5956', ink3: '#87918E',
+  rule: '#D6DCD9', rule2: '#E4E8E6', track: '#E1E6E4',
+  good: '#12805F', mid: '#B26B12', bad: '#C43D2B',
+};
+
+function exportPNG() {
+  const list = order.map(n => rows[n]).filter(r => r._done)
+    .sort((a, b) => rankVal(b) - rankVal(a));
+  if (!list.length) return;
+
+  const scale = 2, W = 1280, rowH = 36, pad = 44;
+  const headH = 190, thH = 38;
+  const H = headH + thH + list.length * rowH + 64;
+  const canvas = document.createElement('canvas');
+  canvas.width = W * scale; canvas.height = H * scale;
+  const ctx = canvas.getContext('2d');
+  ctx.scale(scale, scale);
+  ctx.textBaseline = 'middle';
+
+  ctx.fillStyle = PNG.bg; ctx.fillRect(0, 0, W, H);
+
+  // 标题区
+  ctx.fillStyle = PNG.ink; ctx.font = `600 24px ${FONT}`;
+  ctx.fillText('节点测速报告', pad, 46);
+  const now = new Date();
+  const ts = now.toLocaleString('zh-CN', { hour12: false });
+  // 图片常被转发分享，订阅只画脱敏后的形式，不能带出 token
+  const srcText = maskSrc(currentSrc || $('src').value.trim());
+  ctx.fillStyle = PNG.ink3; ctx.font = `13px ${FONT}`;
+  ctx.fillText(`测试时间  ${ts}`, pad, 76);
+  ctx.fillText(`订阅  ${ellipsize(ctx, srcText, W - pad * 2 - 40)}`, pad, 96);
+  const userinfo = (order.length && rows[order[0]].userinfo) || '';
+  if (userinfo) ctx.fillText(`流量  ${userinfo}`, pad, 116);
+
+  // 汇总读数
+  const okN = list.filter(r => r.ok).length;
+  const speeds = list.map(r => r.speed_mbps).filter(v => v != null);
+  const lats = list.map(r => r.http_ms).filter(v => v != null);
+  const maxSpeed = speeds.length ? Math.max(...speeds) : 0;
+  const summary = [
+    ['节点', String(list.length), PNG.ink], ['可用', String(okN), PNG.good],
+    ['失败', String(list.length - okN), list.length - okN ? PNG.bad : PNG.ink],
+    ['最快 Mbps', speeds.length ? maxSpeed.toFixed(1) : '-', PNG.ink],
+    ['最低延迟 ms', lats.length ? Math.min(...lats).toFixed(0) : '-', PNG.ink],
+  ];
+  if (testElapsed) summary.push(['耗时', testElapsed, PNG.ink]);
+  let sx = pad;
+  summary.forEach(([k, v, c], i) => {
+    if (i) { ctx.strokeStyle = PNG.rule; ctx.beginPath(); ctx.moveTo(sx, 138); ctx.lineTo(sx, 176); ctx.stroke(); sx += 20; }
+    ctx.fillStyle = c; ctx.font = `600 24px ${NUM_FONT}`; ctx.fillText(v, sx, 150);
+    const vw = ctx.measureText(v).width;
+    ctx.fillStyle = PNG.ink3; ctx.font = `12px ${FONT}`; ctx.fillText(k, sx, 170);
+    sx += Math.max(vw, ctx.measureText(k).width) + 20;
+  });
+
+  // 表头
+  const cols = [
+    { t: '#', w: 40 }, { t: '节点', w: 300 }, { t: '协议', w: 80 },
+    { t: '落地', w: 90 }, { t: '解锁', w: 170 },
+    { t: '延迟', w: 90 }, { t: '下载速度 (Mbps)', w: 300 }, { t: '状态', w: 80 },
+  ];
+  const tblX = pad, tblW = W - pad * 2;
+  const colX = []; let cx = tblX;
+  cols.forEach(c => { colX.push(cx); cx += c.w; });
+  cols[cols.length - 1].w = tblW - (cx - cols[cols.length - 1].w - tblX);
+
+  ctx.fillStyle = PNG.ink; ctx.fillRect(tblX, headH, tblW, 1);
+  ctx.fillStyle = PNG.ink3; ctx.font = `500 12.5px ${FONT}`;
+  cols.forEach((c, i) => ctx.fillText(c.t, colX[i] + 10, headH + thH / 2));
+  ctx.fillStyle = PNG.rule; ctx.fillRect(tblX, headH + thH - 1, tblW, 1);
+
+  // 行
+  list.forEach((r, i) => {
+    const y = headH + thH + i * rowH, cy = y + rowH / 2;
+    ctx.fillStyle = PNG.ink3; ctx.font = `500 13px ${NUM_FONT}`;
+    ctx.fillText(String(i + 1), colX[0] + 10, cy);
+    ctx.fillStyle = r.ok ? PNG.ink : PNG.ink3; ctx.font = `500 13px ${FONT}`;
+    ctx.fillText(ellipsize(ctx, r.name, cols[1].w - 20), colX[1] + 10, cy);
+    ctx.fillStyle = PNG.ink2; ctx.font = `12.5px ${FONT}`;
+    ctx.fillText(r.type || '?', colX[2] + 10, cy);
+    ctx.fillText(ellipsize(ctx, r.country || '-', cols[3].w - 16), colX[3] + 10, cy);
+    const unlockTxt = (r.unlock && typeof r.unlock === 'object')
+      ? Object.entries(r.unlock).filter(([_, v]) => v).map(([k]) => (UNLOCK_ICONS[k] || { name: k }).name.split(' ')[0]).join(' ') || '-'
+      : '-';
+    ctx.fillStyle = unlockTxt === '-' ? PNG.ink3 : PNG.ink2; ctx.font = `12px ${FONT}`;
+    ctx.fillText(ellipsize(ctx, unlockTxt, cols[4].w - 16), colX[4] + 10, cy);
+    const nextIdx = 5;
+    // 延迟：着色数字
+    const latVal = r.http_ms != null ? r.http_ms : r.tcp_ms;
+    ctx.font = `600 14px ${NUM_FONT}`;
+    ctx.fillStyle = latVal != null ? PNG[latTier(latVal)] : PNG.ink3;
+    ctx.fillText(latVal != null ? latVal.toFixed(0) + ' ms' : '-', colX[nextIdx] + 10, cy);
+    // 速度：数值 + 归一化横条
+    const sx0 = colX[nextIdx + 1] + 10, sw = cols[nextIdx + 1].w - 20;
+    if (r.speed_mbps != null) {
+      const v = r.speed_mbps, numW = 52;
+      ctx.fillStyle = PNG.ink; ctx.font = `600 14px ${NUM_FONT}`;
+      ctx.textAlign = 'right'; ctx.fillText(v.toFixed(1), sx0 + numW - 6, cy); ctx.textAlign = 'left';
+      const bx = sx0 + numW + 4, bw = sw - numW - 4;
+      ctx.fillStyle = PNG.track; ctx.fillRect(bx, cy - 4, bw, 8);
+      ctx.fillStyle = PNG[speedTier(v)]; ctx.fillRect(bx, cy - 4, bw * Math.min(1, v / (maxSpeed || 1)), 8);
+    } else {
+      ctx.fillStyle = PNG.ink3; ctx.font = `12px ${FONT}`; ctx.fillText('-', sx0, cy);
+    }
+    // 状态：圆点 + 文字
+    const stx = colX[nextIdx + 2] + 10;
+    ctx.fillStyle = r.ok ? PNG.good : PNG.bad;
+    ctx.beginPath(); ctx.arc(stx + 3, cy, 3, 0, Math.PI * 2); ctx.fill();
+    ctx.font = `12.5px ${FONT}`; ctx.fillText(classify(r).text, stx + 12, cy);
+
+    ctx.fillStyle = PNG.rule2; ctx.fillRect(tblX, y + rowH - 1, tblW, 1);
+  });
+
+  // 页脚
+  ctx.fillStyle = PNG.ink3; ctx.font = `11.5px ${FONT}`;
+  ctx.fillText('由 nodescope 生成，仅用于网络质量检测', pad, H - 28);
+
+  canvas.toBlob(blob => {
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `节点测速报告_${now.toISOString().slice(0, 10)}.png`;
+    a.click();
+    URL.revokeObjectURL(a.href);
+  });
+}
+
+function exportNodes() {
+  const okNames = new Set(order.filter(n => rows[n]._done && rows[n].ok));
+  if (!okNames.size) {
+    chip('没有可用节点可导出', 'warn');
+    return;
+  }
+  const availableRaw = rawNodes.filter(n => okNames.has(n.name));
+  if (!availableRaw.length) {
+    chip('没有找到原始节点配置', 'warn');
+    return;
+  }
+  let yamlText = 'proxies:\n';
+  availableRaw.forEach(n => {
+    yamlText += `  - name: ${JSON.stringify(n.name)}\n    type: ${n.type}\n    server: ${JSON.stringify(n.server)}\n    port: ${n.port}\n`;
+    for (const [k, v] of Object.entries(n)) {
+      if (['name', 'type', 'server', 'port'].includes(k)) continue;
+      yamlText += `    ${k}: ${JSON.stringify(v)}\n`;
+    }
+  });
+  yamlText += '\nproxy-groups:\n  - name: PROXIES\n    type: select\n    proxies:\n';
+  availableRaw.forEach(n => {
+    yamlText += `      - ${JSON.stringify(n.name)}\n`;
+  });
+  const blob = new Blob([yamlText], { type: 'text/yaml;charset=utf-8' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `available_nodes_${new Date().toISOString().slice(0, 10)}.yaml`;
+  a.click();
+  URL.revokeObjectURL(a.href);
+  // 提示收在浮层里不显眼，导出结果直接在按钮上短暂显示
+  const btn = $('exportNodesBtn');
+  clearTimeout(btn._t);
+  btn.textContent = `已导出 ${availableRaw.length} 个`;
+  btn._t = setTimeout(() => { btn.textContent = '导出可用节点'; }, 2000);
+}
+
+function ellipsize(ctx, text, maxW) {
+  text = String(text);
+  if (ctx.measureText(text).width <= maxW) return text;
+  while (text.length > 1 && ctx.measureText(text + '…').width > maxW) text = text.slice(0, -1);
+  return text + '…';
+}
+
+/* ---------- 主流程 ---------- */
+function start() {
+  const src = $('src').value.trim();
+  if (!src) { $('src').focus(); return; }
+  currentSrc = src;
+  if (es) es.close();
+  if (pendingStart) pendingStart.abort();
+  $('tbody').innerHTML = '';
+  rows = {}; order = []; localBW = null;
+  clearNotes();
+  testStart = Date.now(); testElapsed = '';
+  $('resSrc').textContent = `${maskSrc(src)} · ${optsSummary()}`;
+  showView('results');
+  $('filterInput').value = '';
+  $('empty').style.display = 'none';
+  $('empty').className = 'empty';
+  $('stats').style.display = 'none';
+  $('barFill').style.width = '0';
+  $('progressText').textContent = '提交任务…';
+  $('progressCount').textContent = '';
+  $('pngBtn').disabled = true;
+  $('exportNodesBtn').disabled = true;
+  $('runBtn').textContent = '停止'; $('runBtn').classList.add('stop');
+  sortState = { key: null, asc: true };
+
+  renderHead();
+
+  const payload = {
+    src,
+    speed_seconds: val('speedSeconds'),
+    maxmb: val('maxMb'),
+    concurrency: val('concurrency'),
+    speed_conc: val('speedConc'),
+    nospeed: $('noSpeed').checked ? '1' : '0',
+    unlock: '1',  // 流媒体 / AI 解锁始终检测
+  };
+
+  const ctrl = new AbortController();
+  pendingStart = ctrl;
+  fetch('/api/task', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+    signal: ctrl.signal
+  })
+  .then(res => {
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    return res.json();
+  })
+  .then(data => {
+    if (ctrl.signal.aborted) return;  // 提交期间已被停止
+    pendingStart = null;
+    if (!data.taskId) throw new Error(data.error || '创建测试任务失败');
+    es = new EventSource('/api/stream?taskId=' + encodeURIComponent(data.taskId));
+    setupEventSource(es);
+  })
+  .catch(err => {
+    if (ctrl.signal.aborted) return;
+    pendingStart = null;
+    chip('发起测试失败：' + err.message, 'err');
+    stopUIReset();
+  });
+}
+
+// 参数不能叫 es：否则下面的 es = null 只会清掉形参，全局 es 一直非空，
+// 测完后页面仍判定「测试进行中」（返回要确认、按钮误当成停止）
+function setupEventSource(stream) {
+  stream.addEventListener('status', e => {
+    $('progressText').textContent = JSON.parse(e.data).message;
+  });
+
+  stream.addEventListener('testing', e => {
+    const d = JSON.parse(e.data);
+    const row = rows[d.name];
+    if (row && row._tr) {
+      row._tr.classList.add('testing-node');
+      const stCell = row._tr.cells[row._tr.cells.length - 1];
+      if (stCell) stCell.innerHTML = '<span class="st st-run"><span class="spin"></span>测速中</span>';
+      $('progressText').textContent = `正在测速：${d.name}`;
+    }
+  });
+
+  stream.addEventListener('speed_tick', e => {
+    const d = JSON.parse(e.data);
+    const row = rows[d.name];
+    if (row && row._tr) {
+      const speedCell = row._tr.querySelector('.speed-cell');
+      if (speedCell) {
+        const live = speedCell.querySelector('.spd.live');
+        // 复用已有的条，只更新数值，让宽度过渡连贯
+        if (live) {
+          live.style.setProperty('--v', d.speed_mbps);
+          live.querySelector('.spd-num').textContent = d.speed_mbps.toFixed(1);
+        } else {
+          speedCell.classList.remove('dim');
+          speedCell.innerHTML = speedBar(d.speed_mbps, 'live');
+        }
+      }
+      $('progressText').textContent = `正在测速：${d.name}（${d.speed_mbps.toFixed(1)} Mbps）`;
+    }
+  });
+
+  stream.addEventListener('meta', e => {
+    const m = JSON.parse(e.data);
+    rawNodes = m.raw_nodes || [];
+    if (m.userinfo) chip('订阅流量：' + m.userinfo);
+    m.warns.forEach(w => chip(w, 'warn'));
+    if (m.fake_ip && m.tun_iface) chip('检测到 TUN，已绑定 ' + m.tun_iface + ' 绕过', 'warn');
+    else if (m.fake_ip) chip('检测到 fake-ip，但没能自动选到物理网卡，测速可能失败。可用 --iface 指定网卡', 'err');
+    saveRecent(currentSrc, { count: m.count });
+    m.nodes.forEach((n, i) => {
+      const tr = document.createElement('tr');
+      tr.className = 'pending';
+      tr.innerHTML = `<td class="num rank">${i + 1}</td>` +
+        `<td class="name" title="${esc(n.name)}">${esc(n.name)}</td>` +
+        `<td class="type">${esc(n.type)}</td><td class="dim">-</td>` +
+        `<td class="dim">-</td>` +
+        `<td class="dim latency-cell">-</td>` +
+        `<td class="dim speed-cell">-</td>` +
+        `<td><span class="st st-wait">排队中</span></td>`;
+      $('tbody').appendChild(tr);
+      rows[n.name] = { ...n, userinfo: m.userinfo, _tr: tr, _done: false };
+      order.push(n.name);
+    });
+    updateStats();
+    setProgress(0, m.count, 0);
+  });
+
+  stream.addEventListener('localbw', e => {
+    localBW = JSON.parse(e.data).mbps;
+    chip(`本机带宽 ${localBW.toFixed(1)} Mbps（直连测得；节点速度接近它说明撞到了本机上限）`);
+  });
+
+  stream.addEventListener('result', e => {
+    const r = JSON.parse(e.data);
+    if (rows[r.name]) updateRow(r.name, r);
+    const doneCount = order.filter(n => rows[n]._done).length;
+    const ok = order.filter(n => rows[n]._done && rows[n].ok).length;
+    setProgress(doneCount, order.length, ok);
+  });
+
+  stream.addEventListener('done', e => {
+    const d = JSON.parse(e.data);
+    testElapsed = fmtElapsed(Date.now() - testStart);
+    $('barFill').style.width = '100%';
+    $('progressText').textContent = `测速完成，${d.ok}/${d.total} 个节点可用`;
+    $('progressCount').textContent = `用时 ${testElapsed}`;
+    if (!d.ok) chip('没有可用节点', 'warn');
+    saveRecent(currentSrc, { count: d.total, ok: d.ok });
+    order.forEach(n => {
+      const r = rows[n];
+      if (r && r._done && r._tr) r._tr.innerHTML = render(r);
+    });
+    updateStats();
+    finishUI();
+    stream.close();
+    if (es === stream) es = null;
+  });
+
+  stream.addEventListener('error', e => {
+    if (e.data) {
+      try { chip('错误：' + JSON.parse(e.data).message, 'err'); }
+      catch (err) { chip('错误：' + e.data, 'err'); }
+    } else if (!order.length) {
+      chip('连接中断：读取订阅或启动内核失败，请重试', 'err');
+    } else {
+      chip('连接中断，测试已停止', 'warn');
+    }
+    finishUI();
+    stream.close();
+    if (es === stream) es = null;
+  });
+}
+
+function fmtElapsed(ms) {
+  const s = Math.round(ms / 1000);
+  return s >= 60 ? `${Math.floor(s / 60)}分${s % 60}秒` : `${s}秒`;
+}
+function stopUIReset() {
+  $('runBtn').textContent = '重新测速'; $('runBtn').classList.remove('stop');
+}
+const isRunning = () => !!(es || pendingStart);
+function stopTest() {
+  if (es) { es.close(); es = null; }
+  if (pendingStart) { pendingStart.abort(); pendingStart = null; }
+  finishUI(); chip('已手动停止', 'warn');
+  $('progressText').textContent = '已手动停止';
+}
+// 首页与结果页切换：结果页覆盖首页，返回时刷新「最近测过」（可用数在测完时才写入）
+function showView(v) {
+  document.body.dataset.view = v;
+  if (v === 'home') {
+    renderRecent();
+    $('src').focus();
+  }
+}
+function finishUI() {
+  stopUIReset();
+  document.querySelectorAll('tr.testing-node').forEach(tr => tr.classList.remove('testing-node'));
+  // 完成、出错、手动停止都走这里：测试期间暂缓的排序在此统一执行
+  refreshRanks();
+}
+
+$('filterInput').addEventListener('input', () => {
+  const kw = $('filterInput').value.trim().toLowerCase();
+  for (const name of order) {
+    const r = rows[name];
+    if (!r || !r._tr) continue;
+    if (!kw) {
+      r._tr.style.display = '';
+      continue;
+    }
+    const unlockStr = (r.unlock && typeof r.unlock === 'object')
+      ? Object.entries(r.unlock).filter(([_, v]) => v).map(([k]) => k).join(' ')
+      : '';
+    const match = (
+      (r.name || '').toLowerCase().includes(kw) ||
+      (r.type || '').toLowerCase().includes(kw) ||
+      (r.country || '').toLowerCase().includes(kw) ||
+      unlockStr.includes(kw)
+    );
+    r._tr.style.display = match ? '' : 'none';
+  }
+});
+
+// 只测延迟时，测速相关选项无意义，置灰
+function syncSpeedOpts() { $('speedOpts').disabled = $('noSpeed').checked; }
+$('noSpeed').addEventListener('change', syncSpeedOpts);
+syncSpeedOpts();
+renderRecent();
+
+// 结果页标题旁写出本次的测试参数，方便对照
+function optsSummary() {
+  const parts = [];
+  if ($('noSpeed').checked) parts.push('只测延迟');
+  else {
+    const mb = val('maxMb');
+    parts.push(`${val('speedSeconds')} 秒`, mb ? `${mb} MB` : '不限流量');
+    if (val('speedConc') !== '1') parts.push(`同时 ${val('speedConc')} 个`);
+  }
+  parts.push(`并发 ${val('concurrency')}`);
+  return parts.join(' · ');
+}
+
+// 首页「解锁检测」：复用表格里的平台图标
+$('platforms').innerHTML = Object.values(UNLOCK_ICONS).map(item =>
+  `<span class="platform"><span class="icon-badge"><img src="${ICON_BASE}${item.file}" width="16" height="16" alt="" loading="lazy"></span>${esc(item.name)}</span>`
+).join('');
+
+// 浮层：点外面或按 Esc 收起
+document.addEventListener('click', e => {
+  document.querySelectorAll('details.pop[open]').forEach(d => { if (!d.contains(e.target)) d.open = false; });
+});
+document.addEventListener('keydown', e => {
+  if (e.key !== 'Escape') return;
+  document.querySelectorAll('details.pop[open]').forEach(d => { d.open = false; d.querySelector('summary').focus(); });
+});
+
+$('go').addEventListener('click', start);
+$('src').addEventListener('keydown', e => { if (e.key === 'Enter') start(); });
+// 结果页右上角：测试中是「停止」，结束后是「重新测速」（用同一个订阅和当前选项）
+$('runBtn').addEventListener('click', () => {
+  if (isRunning()) { stopTest(); return; }
+  $('src').value = currentSrc;
+  start();
+});
+$('backBtn').addEventListener('click', () => {
+  if (isRunning()) {
+    if (!confirm('测试还在进行，返回首页会停止本次测试。')) return;
+    stopTest();
+  }
+  showView('home');
+});
+</script>
+</body>
+</html>

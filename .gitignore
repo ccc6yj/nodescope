@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+report.html
+result.json
+tmp/
+
+# start.sh 自动下载的 mihomo 内核
+bin/
