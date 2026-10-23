@@ -6,3 +6,4 @@ tmp/
 
 # start.sh 自动下载的 mihomo 内核
 bin/
+.venv
