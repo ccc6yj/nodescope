@@ -533,7 +533,7 @@
           <div class="pop-panel"><div class="notes" id="chips"></div></div>
         </details>
         <button class="btn ghost" id="exportNodesBtn" disabled onclick="exportNodes()">导出可用节点</button>
-        <button class="btn ghost" id="pngBtn" disabled onclick="try{exportPNG()}catch(e){chip('导出失败: '+e.message,'err')}">导出图片</button>
+        <button class="btn ghost" id="pngBtn" disabled onclick="exportPNG().catch(e => chip('导出失败: ' + e.message, 'err'))">导出图片</button>
       </div>
     </div>
 
@@ -954,10 +954,35 @@ const PNG = {
   good: '#0F7656', mid: '#9A5C0E', bad: '#C43D2B',
 };
 
-function exportPNG() {
+// 导出图里的解锁图标：首次导出时加载，之后复用；单个加载失败则该平台退回文字
+let pngIcons = null;
+function loadPngIcons() {
+  if (!pngIcons) {
+    pngIcons = Promise.all(Object.entries(UNLOCK_ICONS).map(([key, item]) => new Promise(resolve => {
+      const img = new Image();
+      img.onload = () => resolve([key, img]);
+      img.onerror = () => resolve([key, null]);
+      img.src = ICON_BASE + item.file;
+    }))).then(Object.fromEntries);
+  }
+  return pngIcons;
+}
+
+function roundRectPath(ctx, x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r);
+  ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
+}
+
+async function exportPNG() {
   const list = order.map(n => rows[n]).filter(r => r._done)
     .sort((a, b) => rankVal(b) - rankVal(a));
   if (!list.length) return;
+  const icons = await loadPngIcons();
 
   const scale = 2, W = 1280, rowH = 36, pad = 44;
   const headH = 190, thH = 38;
@@ -1006,8 +1031,8 @@ function exportPNG() {
 
   // 表头
   const cols = [
-    { t: '#', w: 40 }, { t: '节点', w: 300 }, { t: '协议', w: 80 },
-    { t: '落地', w: 90 }, { t: '解锁', w: 170 },
+    { t: '#', w: 40 }, { t: '节点', w: 270 }, { t: '协议', w: 80 },
+    { t: '落地', w: 90 }, { t: '解锁', w: 200 },
     { t: '延迟', w: 90 }, { t: '下载速度 (Mbps)', w: 300 }, { t: '状态', w: 80 },
   ];
   const tblX = pad, tblW = W - pad * 2;
@@ -1030,11 +1055,28 @@ function exportPNG() {
     ctx.fillStyle = PNG.ink2; ctx.font = `12.5px ${FONT}`;
     ctx.fillText(r.type || '?', colX[2] + 10, cy);
     ctx.fillText(ellipsize(ctx, r.country || '-', cols[3].w - 16), colX[3] + 10, cy);
-    const unlockTxt = (r.unlock && typeof r.unlock === 'object')
-      ? Object.entries(r.unlock).filter(([_, v]) => v).map(([k]) => (UNLOCK_ICONS[k] || { name: k }).name.split(' ')[0]).join(' ') || '-'
-      : '-';
-    ctx.fillStyle = unlockTxt === '-' ? PNG.ink3 : PNG.ink2; ctx.font = `12px ${FONT}`;
-    ctx.fillText(ellipsize(ctx, unlockTxt, cols[4].w - 16), colX[4] + 10, cy);
+    // 解锁：与页面表格一致，白底圆角小块里画平台图标；没有图标的平台接在后面写名称
+    const unlocked = (r.unlock && typeof r.unlock === 'object')
+      ? Object.keys(r.unlock).filter(k => r.unlock[k]) : [];
+    const ux1 = colX[4] + cols[4].w - 2;
+    let ux = colX[4] + 10;
+    const unlockNames = [];
+    Object.keys(UNLOCK_ICONS).filter(k => unlocked.includes(k) && icons[k]).forEach(k => {
+      if (ux + 20 > ux1) return;
+      roundRectPath(ctx, ux + .5, cy - 9.5, 19, 19, 4);
+      ctx.fillStyle = '#fff'; ctx.fill();
+      ctx.strokeStyle = PNG.rule2; ctx.lineWidth = 1; ctx.stroke();
+      ctx.drawImage(icons[k], ux + 2, cy - 8, 16, 16);
+      ux += 24;
+    });
+    unlocked.filter(k => !icons[k]).forEach(k => unlockNames.push((UNLOCK_ICONS[k] || { name: k }).name.split(' ')[0]));
+    ctx.font = `12px ${FONT}`;
+    if (unlockNames.length) {
+      ctx.fillStyle = PNG.ink2;
+      ctx.fillText(ellipsize(ctx, unlockNames.join(' '), ux1 - ux), ux, cy);
+    } else if (!unlocked.length) {
+      ctx.fillStyle = PNG.ink3; ctx.fillText('-', ux, cy);
+    }
     const nextIdx = 5;
     // 延迟：着色数字
     const latVal = r.http_ms != null ? r.http_ms : r.tcp_ms;
