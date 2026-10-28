@@ -271,6 +271,8 @@
 
   /* 速度：数值 + 按全场最快值归一化的横条（本页的主视觉） */
   .speed-cell { min-width: 240px; }
+  /* 只测延迟时速度列只有「-」，不需要给速度条留宽度 */
+  #tbl.no-speed .speed-cell { min-width: 0; }
   .spd { display: grid; grid-template-columns: 3.6em 1fr; align-items: center; column-gap: 10px; }
   .spd-num {
     font-family: var(--num); font-size: 15px; font-weight: 600; text-align: right;
@@ -557,6 +559,8 @@ const val = name => (document.querySelector(`input[name="${name}"]:checked`) || 
 const FONT = '-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif';
 const NUM_FONT = '"DIN Alternate","Bahnschrift",-apple-system,"Segoe UI",Roboto,"PingFang SC",sans-serif';
 let es = null, rows = {}, order = [], rawNodes = [], testStart = 0, testElapsed = '', localBW = null;
+// 本场测试是否只测延迟（开测时记下，结果页与导出图据此收窄速度列）
+let testNoSpeed = false;
 // 任务提交中（EventSource 尚未建立）时的中止器：此时点「停止」也必须能停，不能再开一场
 let pendingStart = null;
 
@@ -987,7 +991,8 @@ async function exportPNG() {
   if (!list.length) return;
   const icons = await loadPngIcons();
 
-  const scale = 2, W = 1280, rowH = 36, pad = 44;
+  // 只测延迟时速度列只有「-」，收窄这一列（260→120），图也相应变窄，免得中间空一大块
+  const scale = 2, W = testNoSpeed ? 1140 : 1280, rowH = 36, pad = 44;
   const headH = 190, thH = 38;
   const H = headH + thH + list.length * rowH + 64;
   const canvas = document.createElement('canvas');
@@ -1033,15 +1038,17 @@ async function exportPNG() {
   });
 
   // 表头
+  // 落地常是「荷兰 阿姆斯特丹」这类较长的地名，给 130px；最后一列吃掉剩余宽度
   const cols = [
-    { t: '#', w: 40 }, { t: '节点', w: 270 }, { t: '协议', w: 80 },
-    { t: '落地', w: 90 }, { t: '解锁', w: 200 },
-    { t: '延迟', w: 90 }, { t: '下载速度 (Mbps)', w: 300 }, { t: '状态', w: 80 },
+    { k: 'rank', t: '#', w: 40 }, { k: 'name', t: '节点', w: 270 }, { k: 'type', t: '协议', w: 80 },
+    { k: 'country', t: '落地', w: 130 }, { k: 'unlock', t: '解锁', w: 200 },
+    { k: 'latency', t: '延迟', w: 90 }, { k: 'speed', t: '下载速度 (Mbps)', w: testNoSpeed ? 120 : 260 }, { k: 'status', t: '状态', w: 80 },
   ];
   const tblX = pad, tblW = W - pad * 2;
   const colX = []; let cx = tblX;
   cols.forEach(c => { colX.push(cx); cx += c.w; });
   cols[cols.length - 1].w = tblW - (cx - cols[cols.length - 1].w - tblX);
+  const ci = Object.fromEntries(cols.map((c, i) => [c.k, i]));
 
   ctx.fillStyle = PNG.ink; ctx.fillRect(tblX, headH, tblW, 1);
   ctx.fillStyle = PNG.ink3; ctx.font = `500 12.5px ${FONT}`;
@@ -1052,17 +1059,17 @@ async function exportPNG() {
   list.forEach((r, i) => {
     const y = headH + thH + i * rowH, cy = y + rowH / 2;
     ctx.fillStyle = PNG.ink3; ctx.font = `500 13px ${NUM_FONT}`;
-    ctx.fillText(String(i + 1), colX[0] + 10, cy);
+    ctx.fillText(String(i + 1), colX[ci.rank] + 10, cy);
     ctx.fillStyle = r.ok ? PNG.ink : PNG.ink3; ctx.font = `500 13px ${FONT}`;
-    ctx.fillText(ellipsize(ctx, r.name, cols[1].w - 20), colX[1] + 10, cy);
+    ctx.fillText(ellipsize(ctx, r.name, cols[ci.name].w - 20), colX[ci.name] + 10, cy);
     ctx.fillStyle = PNG.ink2; ctx.font = `12.5px ${FONT}`;
-    ctx.fillText(r.type || '?', colX[2] + 10, cy);
-    ctx.fillText(ellipsize(ctx, r.country || '-', cols[3].w - 16), colX[3] + 10, cy);
+    ctx.fillText(r.type || '?', colX[ci.type] + 10, cy);
+    ctx.fillText(ellipsize(ctx, r.country || '-', cols[ci.country].w - 16), colX[ci.country] + 10, cy);
     // 解锁：与页面表格一致，白底圆角小块里画平台图标；没有图标的平台接在后面写名称
     const unlocked = (r.unlock && typeof r.unlock === 'object')
       ? Object.keys(r.unlock).filter(k => r.unlock[k]) : [];
-    const ux1 = colX[4] + cols[4].w - 2;
-    let ux = colX[4] + 10;
+    const ux1 = colX[ci.unlock] + cols[ci.unlock].w - 2;
+    let ux = colX[ci.unlock] + 10;
     const unlockNames = [];
     Object.keys(UNLOCK_ICONS).filter(k => unlocked.includes(k) && icons[k]).forEach(k => {
       if (ux + 20 > ux1) return;
@@ -1080,14 +1087,13 @@ async function exportPNG() {
     } else if (!unlocked.length) {
       ctx.fillStyle = PNG.ink3; ctx.fillText('-', ux, cy);
     }
-    const nextIdx = 5;
     // 延迟：着色数字
     const latVal = r.http_ms != null ? r.http_ms : r.tcp_ms;
     ctx.font = `600 14px ${NUM_FONT}`;
     ctx.fillStyle = latVal != null ? PNG[latTier(latVal)] : PNG.ink3;
-    ctx.fillText(latVal != null ? latVal.toFixed(0) + ' ms' : '-', colX[nextIdx] + 10, cy);
+    ctx.fillText(latVal != null ? latVal.toFixed(0) + ' ms' : '-', colX[ci.latency] + 10, cy);
     // 速度：数值 + 归一化横条
-    const sx0 = colX[nextIdx + 1] + 10, sw = cols[nextIdx + 1].w - 20;
+    const sx0 = colX[ci.speed] + 10, sw = cols[ci.speed].w - 20;
     if (r.speed_mbps != null) {
       const v = r.speed_mbps, numW = 52;
       ctx.fillStyle = PNG.ink; ctx.font = `600 14px ${NUM_FONT}`;
@@ -1099,7 +1105,7 @@ async function exportPNG() {
       ctx.fillStyle = PNG.ink3; ctx.font = `12px ${FONT}`; ctx.fillText('-', sx0, cy);
     }
     // 状态：圆点 + 文字
-    const stx = colX[nextIdx + 2] + 10;
+    const stx = colX[ci.status] + 10;
     ctx.fillStyle = r.ok ? PNG.good : PNG.bad;
     ctx.beginPath(); ctx.arc(stx + 3, cy, 3, 0, Math.PI * 2); ctx.fill();
     ctx.font = `12.5px ${FONT}`; ctx.fillText(classify(r).text, stx + 12, cy);
@@ -1187,6 +1193,8 @@ function start() {
   $('exportNodesBtn').disabled = true;
   $('runBtn').textContent = '停止'; $('runBtn').classList.add('stop');
   sortState = { key: null, asc: true };
+  testNoSpeed = $('noSpeed').checked;
+  $('tbl').classList.toggle('no-speed', testNoSpeed);
 
   renderHead();
 
