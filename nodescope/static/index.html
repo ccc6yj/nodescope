@@ -11,19 +11,23 @@
     --field: #FBFCFB;
     --ink: #18211F;
     --ink-2: #4D5956;
-    --ink-3: #87918E;
+    --ink-3: #646E6B;
     --rule: #D6DCD9;
     --rule-2: #E4E8E6;
     --hover: rgba(24, 33, 31, .035);
     --accent: #2E43D1;
     --accent-ink: #FFFFFF;
     --accent-soft: rgba(46, 67, 209, .08);
-    --good: #12805F;
-    --mid: #B26B12;
+    --good: #0F7656;
+    --mid: #9A5C0E;
     --bad: #C43D2B;
     --track: #E1E6E4;
     --tip-bg: #18211F;
     --tip-ink: #F2F4F3;
+    /* 分段控件：凹槽底 + 浮起的选中块，避免与蓝色主按钮抢视线 */
+    --seg-bg: #E6EAE8;
+    --seg-on: #FFFFFF;
+    --seg-shadow: 0 1px 2px rgba(24, 33, 31, .12), 0 0 0 .5px rgba(24, 33, 31, .08);
     /* 只用系统字体，不加载任何外部字体：数字用系统自带的 DIN 风格窄体
        （macOS: DIN Alternate，Windows: Bahnschrift），缺失时退回系统 UI 字体 */
     --num: "DIN Alternate", "Bahnschrift", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC", sans-serif;
@@ -32,20 +36,22 @@
   }
   @media (prefers-color-scheme: dark) {
     :root:not([data-theme="light"]) {
-      --bg: #131918; --field: #182020; --ink: #E3E9E7; --ink-2: #A7B2AF; --ink-3: #6C7875;
+      --bg: #131918; --field: #182020; --ink: #E3E9E7; --ink-2: #A7B2AF; --ink-3: #808C88;
       --rule: #2A3432; --rule-2: #212A28; --hover: rgba(227, 233, 231, .04);
       --accent: #8595FF; --accent-ink: #10152E; --accent-soft: rgba(133, 149, 255, .12);
       --good: #4CC59A; --mid: #E2A64C; --bad: #F07A68; --track: #243030;
       --tip-bg: #E3E9E7; --tip-ink: #131918;
+      --seg-bg: #0E1312; --seg-on: #2B3634; --seg-shadow: none;
       color-scheme: dark;
     }
   }
   :root[data-theme="dark"] {
-    --bg: #131918; --field: #182020; --ink: #E3E9E7; --ink-2: #A7B2AF; --ink-3: #6C7875;
+    --bg: #131918; --field: #182020; --ink: #E3E9E7; --ink-2: #A7B2AF; --ink-3: #808C88;
     --rule: #2A3432; --rule-2: #212A28; --hover: rgba(227, 233, 231, .04);
     --accent: #8595FF; --accent-ink: #10152E; --accent-soft: rgba(133, 149, 255, .12);
     --good: #4CC59A; --mid: #E2A64C; --bad: #F07A68; --track: #243030;
     --tip-bg: #E3E9E7; --tip-ink: #131918;
+      --seg-bg: #0E1312; --seg-on: #2B3634; --seg-shadow: none;
     color-scheme: dark;
   }
 
@@ -107,15 +113,15 @@
   fieldset.speed-opts { display: contents; border: 0; }
   fieldset.speed-opts:disabled .opt { opacity: .4; }
   fieldset.speed-opts:disabled .seg label { cursor: not-allowed; }
-  .seg { display: inline-flex; border: 1px solid var(--rule); border-radius: 8px; padding: 2px; background: var(--field); }
+  .seg { display: inline-flex; border-radius: 8px; padding: 2px; background: var(--seg-bg); }
   .seg label { position: relative; cursor: pointer; }
   .seg input { position: absolute; opacity: 0; pointer-events: none; }
   .seg span {
-    display: block; padding: 4px 11px; border-radius: 6px; white-space: nowrap;
-    font-variant-numeric: tabular-nums; transition: background-color .12s, color .12s;
+    display: block; padding: 4px 11px; border-radius: 6px; white-space: nowrap; color: var(--ink-2);
+    font-variant-numeric: tabular-nums; transition: background-color .12s, color .12s, box-shadow .12s;
   }
   .seg label:hover span { color: var(--ink); }
-  .seg input:checked + span { background: var(--ink); color: var(--bg); }
+  .seg input:checked + span { background: var(--seg-on); color: var(--ink); box-shadow: var(--seg-shadow); }
   .seg input:focus-visible + span { outline: 2px solid var(--accent); outline-offset: 1px; }
   .check { display: inline-flex; align-items: center; gap: 7px; cursor: pointer; color: var(--ink-2); }
   .check input { accent-color: var(--accent); width: 15px; height: 15px; }
