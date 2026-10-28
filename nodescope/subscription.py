@@ -257,13 +257,18 @@ def format_userinfo(info):
     return msg
 
 
+# 顶层 proxies / proxy-providers 键（行首，可带 BOM 或引号）。只认顶层键而不是子串，
+# 否则节点 path/名字里含 "proxies" 的 URI 列表会被当成 YAML，语法错后整份订阅解析失败
+_CLASH_KEY_RE = re.compile(r"""^\ufeff?["']?(?:proxies|proxy-providers)["']?\s*:""", re.M)
+
+
 def _parse_clash_yaml(text):
     """尝试按 Clash YAML 解析，返回 (nodes, warns)。
 
     warns 里的内容用于区分「压根不是 YAML」「YAML 语法错」「有 proxies 但没有合法节点」
     三种情况，否则用户只会看到「未解析到任何节点」而毫无线索。
     """
-    if not ("proxies" in text[:2000] or text.lstrip().startswith("{")):
+    if not (_CLASH_KEY_RE.search(text) or text.lstrip().startswith("{")):
         return [], []
     try:
         cfg = yaml.safe_load(text)
@@ -275,7 +280,13 @@ def _parse_clash_yaml(text):
         return [], []
     raw = cfg.get("proxies")
     if not raw:
-        return [], ["Clash 配置里没有 proxies 字段"] if "proxies" in cfg else []
+        if "proxy-providers" in cfg:
+            return [], ["Clash 配置仅包含 proxy-providers，未包含静态 proxies 节点（暂不支持外部 provider 自动下载）"]
+        if "proxies" in cfg:
+            return [], ["Clash 配置里 proxies 列表为空"]
+        if any(k in cfg for k in ("rules", "proxy-groups", "rule-providers", "dns", "geox-url")):
+            return [], ["Clash 配置里没有 proxies 节点列表"]
+        return [], []
     if not isinstance(raw, list):
         return [], ["Clash 配置的 proxies 字段不是列表"]
     nodes, skipped = [], 0
@@ -298,20 +309,20 @@ def parse(text):
     if not text:
         return [], ["订阅内容为空"]
 
-    # 1) 尝试 Clash YAML（dns/rules 可能很长，不能只看前 2000 字）
+    # 1) 尝试 Clash YAML（dns/rules 可能很长，全文按顶层键检测）
     nodes, warns = _parse_clash_yaml(text)
     if nodes:
         return nodes, warns
-    yaml_warns = warns
+    if warns:
+        # 明确识别为 Clash 配置且产生诊断信息（语法错误、缺少/空 proxies 等），不再回退为普通 URI 列表
+        return [], warns
 
     # 1.5) Base64 包裹的 Clash YAML（部分机场把 yaml 整体 base64 下发）
     with contextlib.suppress(Exception):
         decoded = _b64decode(text).decode("utf-8")
-        if "proxies" in decoded:
-            b_nodes, b_warns = _parse_clash_yaml(decoded)
-            if b_nodes:
-                return b_nodes, b_warns
-            yaml_warns = yaml_warns or b_warns
+        b_nodes, b_warns = _parse_clash_yaml(decoded)
+        if b_nodes or b_warns:
+            return b_nodes, b_warns
 
     # 2) QuantumultX 格式（trojan=host:port, password=..., tag=...）
     #    真实配置文件带 [general] / [server_local] 段头与 server_check_url 等键，
@@ -345,9 +356,6 @@ def parse(text):
             continue
         if node:
             nodes.append(node)
-    # 什么都没解析出来时，把 YAML 阶段的具体原因补上，便于定位
-    if not nodes and not warns and yaml_warns:
-        warns = yaml_warns
     return nodes, warns
 
 
@@ -468,6 +476,9 @@ def _qx_ss(rest):
     return proxy
 
 
+_SCHEME_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.-]*$")
+
+
 def _decode_uri_lines(text):
     """把订阅文本还原为节点 URI 列表。"""
     text = text.strip().lstrip("\ufeff")
@@ -484,12 +495,36 @@ def _decode_uri_lines(text):
     except Exception:  # noqa: BLE001 - 非 base64 内容很常见，直接走下一分支
         pass
 
-    # 明文中混杂 URI 的兜底
-    return [line.strip() for line in text.splitlines() if "://" in line.strip()]
+    # 明文中混杂 URI 的兜底：提取可能包含代理 URI 的行，过滤掉普通网页/规则链接与非法 scheme
+    candidates = []
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith(("#", ";", "//")):
+            continue
+        # 从 scheme 起取到行尾：节点名可能含未编码的空格或以括号结尾，不能按 \S+ 截断或剥括号
+        m = re.search(r"[a-zA-Z][a-zA-Z0-9+.-]*://", line)
+        if not m:
+            continue
+        uri = line[m.start():]
+        # 只去掉包住 URI 的那对引号，如 url: "ss://..."
+        quote_ch = line[m.start() - 1] if m.start() else ""
+        if quote_ch in ("\"", "'") and uri.endswith(quote_ch):
+            uri = uri[:-1]
+        s = uri.split("://", 1)[0].lower()
+        # 忽略普通网页与规则链接（http/https 绝大多数是说明网页、DoH 或规则库）
+        if s in ("http", "https"):
+            continue
+        candidates.append(uri)
+    return candidates
 
 
 def parse_uri(uri):
-    scheme = uri.split("://", 1)[0].lower()
+    if "://" not in uri:
+        raise ValueError(f"无法识别 URI 格式: {uri[:40]}")
+    scheme_part, _, _ = uri.partition("://")
+    scheme = scheme_part.strip().lower()
+    if not _SCHEME_RE.match(scheme):
+        raise ValueError(f"非法 URI 协议头: {scheme_part[:20]}")
     parser = {
         "ss": _parse_ss,
         "vmess": _parse_vmess,

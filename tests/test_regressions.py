@@ -34,8 +34,11 @@
 30. static/index.html 导出图片 —— 原始订阅 URL（含 token）被画进 PNG，转发截图即泄露订阅
 31. static/index.html 事件流 —— setupEventSource 形参遮蔽全局 es，测完仍被当成进行中
 32. webapp 首页外部资源   —— 字体与解锁图标走 Google Fonts / jsdelivr，国内加载失败且暴露测速行为
+33. subscription.parse   —— proxies 位于 2000 字符后或仅含 provider 时被误判为非 YAML，明文提取把 geox-url 等抓出报 "暂不支持协议 geoip: 'https://"；
+                            且不能矫枉过正：URI 里含 "proxies" 子串不得当成 YAML，明文兜底不得截断带空格/括号的节点名
 """
 
+import base64
 import http.client
 import json
 import os
@@ -1274,6 +1277,90 @@ class TestEventSourceClearsGlobal(unittest.TestCase):
         body = src[m.start():src.index("function fmtElapsed")]
         self.assertIn("es = null", body, "done / error 时必须清空全局 es")
 
+
+class TestClashLongYamlAndUriParsing(unittest.TestCase):
+    """33：Clash 配置前置配置超 2000 字符导致误判为非 YAML，明文提取把 geox-url 抓出报暂不支持协议。"""
+
+    def test_clash_yaml_proxies_after_2000_chars(self):
+        # 原缺陷：text[:2000] 判断 proxies，导致头部很长时漏判，回退到 URI 提取报 "暂不支持协议 geoip: 'https://"
+        long_comment = "# " + ("x" * 80 + "\n# ") * 30  # 约 2400 字符
+        text = (
+            "port: 7890\n"
+            "mode: rule\n"
+            f"{long_comment}\n"
+            "geox-url:\n"
+            "  geoip: 'https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/geoip.dat'\n"
+            "  geosite: 'https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/geosite.dat'\n"
+            "dns:\n"
+            "  nameserver:\n"
+            "    - 'https://doh.pub/dns-query'\n"
+            "proxies:\n"
+            "  - {name: '超长前置节点', type: ss, server: 1.2.3.4, port: 8388, cipher: aes-128-gcm, password: pwd}\n"
+        )
+        nodes, warns = parse(text)
+        self.assertEqual(len(nodes), 1, f"警告: {warns}")
+        self.assertEqual(nodes[0]["name"], "超长前置节点")
+        self.assertFalse(any("暂不支持协议" in w for w in warns))
+
+    def test_clash_yaml_only_proxy_providers(self):
+        # 仅含 proxy-providers 且无 proxies 时，应清晰提示，而不是把内部 URL 当节点报错
+        text = (
+            "port: 7890\n"
+            "geox-url:\n"
+            "  geoip: 'https://github.com/geoip.dat'\n"
+            "proxy-providers:\n"
+            "  p1:\n"
+            "    type: http\n"
+            "    url: 'https://example.com/sub.yaml'\n"
+        )
+        nodes, warns = parse(text)
+        self.assertEqual(len(nodes), 0)
+        self.assertTrue(any("proxy-providers" in w for w in warns))
+        self.assertFalse(any("暂不支持协议" in w for w in warns))
+
+    def test_mixed_text_does_not_extract_web_urls(self):
+        # 明文中混有普通网页说明与真实节点时，忽略普通 http/https 链接
+        text = (
+            "官网地址请访问 https://example.com/help\n"
+            "API 说明: http://api.example.com\n"
+            "- ss://YWVzLTEyOC1nY206cHdk@1.2.3.4:8388#节点01\n"
+        )
+        nodes, warns = parse(text)
+        self.assertEqual(len(nodes), 1)
+        self.assertEqual(nodes[0]["name"], "节点01")
+        self.assertFalse(any("暂不支持协议" in w for w in warns))
+
+    # 以下为修复上面问题时引入、提交前发现的回归：全文搜 "proxies" 子串会把普通 URI 列表当成 YAML
+    _SS = "ss://YWVzLTEyOC1nY206cHdk@1.2.3.4:8388"
+    _URI_LIST_WITH_PROXIES = (
+        f"{_SS}#HK\n"
+        "vless://uuid@h.com:443?type=ws&path=%2Fproxies#JP\n"
+        f"{_SS}#US: 01"  # 含 ": "，按 YAML 解析必然语法错
+    )
+
+    def test_uri_list_containing_proxies_is_not_yaml(self):
+        nodes, warns = parse(self._URI_LIST_WITH_PROXIES)
+        self.assertEqual([n["name"] for n in nodes], ["HK", "JP", "US: 01"], f"警告: {warns}")
+        self.assertFalse(any("YAML" in w for w in warns))
+
+    def test_base64_uri_list_containing_proxies_is_not_yaml(self):
+        text = base64.b64encode(self._URI_LIST_WITH_PROXIES.encode()).decode()
+        nodes, warns = parse(text)
+        self.assertEqual([n["name"] for n in nodes], ["HK", "JP", "US: 01"], f"警告: {warns}")
+        self.assertFalse(any("YAML" in w for w in warns))
+
+    def test_real_clash_yaml_syntax_error_still_reported(self):
+        # 顶层确有 proxies 键的配置写错时，仍要报 YAML 语法错误，而不是静默当 URI 列表
+        text = "proxies:\n  - {name: a, type: ss\n  bad: [\n"
+        nodes, warns = parse(text)
+        self.assertEqual(nodes, [])
+        self.assertTrue(any("YAML 语法错误" in w for w in warns), warns)
+
+    def test_fallback_keeps_names_with_spaces_and_brackets(self):
+        # 首行不是节点 URI 时走明文兜底：节点名含未编码空格或以括号结尾都要保持完整
+        text = f"# 我的节点\n{self._SS}#香港 01\n- {self._SS}#日本(IPLC)\nurl: \"{self._SS}#美国[x2]\"\n"
+        nodes, warns = parse(text)
+        self.assertEqual([n["name"] for n in nodes], ["香港 01", "日本(IPLC)", "美国[x2]"], f"警告: {warns}")
 
 
 if __name__ == "__main__":
