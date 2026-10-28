@@ -264,6 +264,11 @@
   .type { color: var(--ink-2); font-size: 12.5px; }
   .country { font-weight: 500; font-size: 13px; }
 
+  /* IP 质量：家宽/移动风险低（绿），机房中（默认色），机房且被标记为代理/VPN 高（橙） */
+  .ipq { font-size: 12.5px; white-space: nowrap; color: var(--ink-2); }
+  .ipq-low { color: var(--good); }
+  .ipq-high { color: var(--mid); }
+
   /* 延迟：着色数字 */
   .lat { font-family: var(--num); font-size: 15px; font-weight: 600; font-variant-numeric: tabular-nums; }
   .lat small { font-family: var(--sans); font-size: 11px; font-weight: 400; color: var(--ink-3); margin-left: 2px; }
@@ -485,7 +490,7 @@
           <h2>测试流程</h2>
           <ol class="steps">
             <li><span><b>解析订阅</b>多种 UA 各拉一次合并去重，由 mihomo 为每个节点开本地端口。</span></li>
-            <li><span><b>探活</b>按「探活并发」同时测 TCP / HTTP 延迟、落地地区和解锁情况。</span></li>
+            <li><span><b>探活</b>按「探活并发」同时测 TCP / HTTP 延迟、落地地区、IP 类型和解锁情况。</span></li>
             <li><span><b>测速</b>探活通过的节点立即排队下载测速，「同时测速」控制并行数。</span></li>
             <li><span><b>导出</b>测完可导出可用节点（Clash YAML）或整张结果图。</span></li>
           </ol>
@@ -532,7 +537,7 @@
         <span id="progressCount"></span>
       </div>
       <div class="tools">
-        <input id="filterInput" class="filter-box" type="search" aria-label="筛选节点" placeholder="筛选节点名、落地、协议、解锁平台">
+        <input id="filterInput" class="filter-box" type="search" aria-label="筛选节点" placeholder="筛选节点、落地、IP 类型、解锁平台">
         <details class="pop" id="notesPop" hidden>
           <summary class="pop-btn" id="notesBtn">提示 <b id="notesCount">0</b></summary>
           <div class="pop-panel"><div class="notes" id="chips"></div></div>
@@ -581,6 +586,22 @@ const UNLOCK_ICONS = {
 // 分档阈值：速度（Mbps）越高越好，延迟（ms）越低越好
 const speedTier = v => v >= 50 ? 'good' : v >= 10 ? 'mid' : 'bad';
 const latTier = v => v < 300 ? 'good' : v < 800 ? 'mid' : 'bad';
+
+// 出口 IP 质量（后端由 ip-api 的机房/移动/代理标记归纳，见 tester.ip_quality）
+const IP_RISK = { low: 0, mid: 1, high: 2 };
+const IP_RISK_NAME = { low: '低', mid: '中', high: '高' };
+const ipLabel = q => (q && q.type) ? q.type + (q.proxy ? '·代理' : '') : '';
+function ipTip(q) {
+  const parts = [`风险${IP_RISK_NAME[q.risk] || '?'}`];
+  if (q.proxy) parts.push('已被标记为代理/VPN');
+  return parts.concat([q.isp, q.asn].filter(Boolean)).join(' | ');
+}
+function renderIp(q) {
+  const label = ipLabel(q);
+  return label
+    ? `<span class="ipq ipq-${esc(q.risk)}" data-tip="${esc(ipTip(q))}">${esc(label)}</span>`
+    : '<span class="dim">-</span>';
+}
 
 function renderUnlock(u) {
   if (!u || typeof u !== 'object') return '<span class="dim">-</span>';
@@ -816,6 +837,7 @@ function render(r) {
     `<td class="name"><div class="name-txt" title="${esc(r.name)}">${esc(r.name)}</div></td>` +
     `<td class="type">${esc(r.type || '?')}</td>` +
     `<td>${countryCell}</td>` +
+    `<td data-risk="${r.ip_quality && r.ip_quality.risk in IP_RISK ? IP_RISK[r.ip_quality.risk] : ''}">${renderIp(r.ip_quality)}</td>` +
     `<td>${renderUnlock(r.unlock)}</td>` +
     `<td class="num latency-cell">${latCell}</td>` +
     `<td class="num speed-cell">${speedCell}</td>` +
@@ -880,6 +902,9 @@ function applySort() {
     }
     if (sortState.key === 'unlock') {
       return cell.querySelectorAll('.icon-badge').length;
+    }
+    if (sortState.key === 'ip') {
+      return cell.dataset.risk ? Number(cell.dataset.risk) : null;
     }
     if (sortState.key === 'status') {
       if (text.includes('不可用') || text.includes('失败')) return 0;
@@ -946,6 +971,7 @@ function renderHead() {
     <th data-k="name">节点</th>
     <th data-k="type">协议</th>
     <th data-k="country">落地</th>
+    <th data-k="ip" title="出口 IP 类型与风险：家宽/移动风险低，机房中，机房且被标记为代理/VPN 高（AI 服务最容易风控）。悬停数值看 ISP / ASN">IP</th>
     <th data-k="unlock">解锁</th>
     <th data-k="latency" title="经节点的真实端到端延迟（悬停数值可看 TCP 直连入口延迟）">延迟</th>
     <th data-k="speed">下载速度 (Mbps)</th>
@@ -991,7 +1017,7 @@ async function exportPNG() {
   if (!list.length) return;
   const icons = await loadPngIcons();
 
-  // 只测延迟时速度列只有「-」，收窄这一列（260→120），图也相应变窄，免得中间空一大块
+  // 只测延迟时速度列只有「-」，收窄这一列（230→120），图也相应变窄，免得中间空一大块
   const scale = 2, W = testNoSpeed ? 1140 : 1280, rowH = 36, pad = 44;
   const headH = 190, thH = 38;
   const H = headH + thH + list.length * rowH + 64;
@@ -1040,9 +1066,9 @@ async function exportPNG() {
   // 表头
   // 落地常是「荷兰 阿姆斯特丹」这类较长的地名，给 130px；最后一列吃掉剩余宽度
   const cols = [
-    { k: 'rank', t: '#', w: 40 }, { k: 'name', t: '节点', w: 270 }, { k: 'type', t: '协议', w: 80 },
-    { k: 'country', t: '落地', w: 130 }, { k: 'unlock', t: '解锁', w: 200 },
-    { k: 'latency', t: '延迟', w: 90 }, { k: 'speed', t: '下载速度 (Mbps)', w: testNoSpeed ? 120 : 260 }, { k: 'status', t: '状态', w: 80 },
+    { k: 'rank', t: '#', w: 40 }, { k: 'name', t: '节点', w: 230 }, { k: 'type', t: '协议', w: 80 },
+    { k: 'country', t: '落地', w: 130 }, { k: 'ip', t: 'IP', w: 70 }, { k: 'unlock', t: '解锁', w: 200 },
+    { k: 'latency', t: '延迟', w: 90 }, { k: 'speed', t: '下载速度 (Mbps)', w: testNoSpeed ? 120 : 230 }, { k: 'status', t: '状态', w: 80 },
   ];
   const tblX = pad, tblW = W - pad * 2;
   const colX = []; let cx = tblX;
@@ -1065,6 +1091,9 @@ async function exportPNG() {
     ctx.fillStyle = PNG.ink2; ctx.font = `12.5px ${FONT}`;
     ctx.fillText(r.type || '?', colX[ci.type] + 10, cy);
     ctx.fillText(ellipsize(ctx, r.country || '-', cols[ci.country].w - 16), colX[ci.country] + 10, cy);
+    const ipq = r.ip_quality;
+    ctx.fillStyle = !ipLabel(ipq) ? PNG.ink3 : ipq.risk === 'low' ? PNG.good : ipq.risk === 'high' ? PNG.mid : PNG.ink2;
+    ctx.fillText(ellipsize(ctx, ipLabel(ipq) || '-', cols[ci.ip].w - 16), colX[ci.ip] + 10, cy);
     // 解锁：与页面表格一致，白底圆角小块里画平台图标；没有图标的平台接在后面写名称
     const unlocked = (r.unlock && typeof r.unlock === 'object')
       ? Object.keys(r.unlock).filter(k => r.unlock[k]) : [];
@@ -1287,7 +1316,7 @@ function setupEventSource(stream) {
       tr.innerHTML = `<td class="num rank">${i + 1}</td>` +
         `<td class="name"><div class="name-txt" title="${esc(n.name)}">${esc(n.name)}</div></td>` +
         `<td class="type">${esc(n.type)}</td><td class="dim">-</td>` +
-        `<td class="dim">-</td>` +
+        `<td class="dim">-</td><td class="dim">-</td>` +
         `<td class="dim latency-cell">-</td>` +
         `<td class="dim speed-cell">-</td>` +
         `<td><span class="st st-wait">排队中</span></td>`;
@@ -1390,6 +1419,7 @@ $('filterInput').addEventListener('input', () => {
       (r.name || '').toLowerCase().includes(kw) ||
       (r.type || '').toLowerCase().includes(kw) ||
       (r.country || '').toLowerCase().includes(kw) ||
+      ipLabel(r.ip_quality).includes(kw) ||
       unlockStr.includes(kw)
     );
     r._tr.style.display = match ? '' : 'none';

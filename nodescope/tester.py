@@ -96,13 +96,42 @@ def _format_geo_name(country, city, country_code):
     return country or city or loc
 
 
+def ip_quality(d):
+    """由 ip-api 的 mobile / hosting / proxy 字段归纳出口 IP 质量。
+
+    type：移动 > 机房 > 家宽（三者都没标记时视为住宅宽带）。
+    risk：家宽/移动且未被标记为代理 → low；机房、或住宅却被标记为代理 → mid；
+    机房且被标记为代理/VPN → high（AI 服务最容易风控的一类）。
+    """
+    mobile, hosting, proxy = bool(d.get("mobile")), bool(d.get("hosting")), bool(d.get("proxy"))
+    ip_type = "移动" if mobile else "机房" if hosting else "家宽"
+    if hosting and proxy:
+        risk = "high"
+    elif hosting or proxy:
+        risk = "mid"
+    else:
+        risk = "low"
+    return {
+        "type": ip_type,
+        "proxy": proxy,
+        "risk": risk,
+        "isp": d.get("isp") or d.get("org") or "",
+        "asn": d.get("as") or "",
+    }
+
+
 def fetch_node_geo(port, timeout=3.5):
-    """经节点查询落地 IP、精准城市与国家地区（标准中文输出，如「日本 东京」、「美国 洛杉矶」）。"""
+    """经节点查询落地 IP、精准城市与国家地区（标准中文输出，如「日本 东京」、「美国 洛杉矶」）。
+
+    主引擎 ip-api 同一次请求顺带返回 IP 质量（quality，见 ip_quality），不额外耗请求；
+    备用引擎 Cloudflare Trace 没有这类信息，quality 为 None。
+    """
     proxies = _proxies(port)
 
-    # 1) 主引擎：ip-api (直出标准中文物理城市)
+    # 1) 主引擎：ip-api (直出标准中文物理城市 + 机房/移动/代理标记)
     try:
-        url_ipapi = "http://ip-api.com/json/?lang=zh-CN&fields=status,country,countryCode,city,query"
+        url_ipapi = ("http://ip-api.com/json/?lang=zh-CN"
+                     "&fields=status,country,countryCode,city,query,isp,org,as,mobile,proxy,hosting")
         resp = requests.get(url_ipapi, proxies=proxies, timeout=(min(timeout, 2.0), min(timeout, 2.0)))
         if resp.status_code == 200:
             d = resp.json()
@@ -111,7 +140,8 @@ def fetch_node_geo(port, timeout=3.5):
                 city = d.get("city") or ""
                 loc = (d.get("countryCode") or "").upper()
                 disp = _format_geo_name(country, city, loc)
-                return {"ip": d.get("query"), "country": disp, "country_code": loc}
+                return {"ip": d.get("query"), "country": disp, "country_code": loc,
+                        "quality": ip_quality(d)}
     except Exception:
         pass
 
@@ -135,7 +165,7 @@ def fetch_node_geo(port, timeout=3.5):
             cname = COUNTRY_NAMES.get(loc, loc)
             city = COLO_CITIES.get(colo)
             disp = _format_geo_name(cname, city, loc)
-            return {"ip": ip, "country": disp, "country_code": loc}
+            return {"ip": ip, "country": disp, "country_code": loc, "quality": None}
     except Exception:
         pass
     return None
@@ -788,6 +818,7 @@ def test_node(node, runner=None, options=None):
         "ip": None,
         "country": None,
         "country_code": None,
+        "ip_quality": None,
         "unlock": None,
         "ok": False,
         "error": None,
@@ -849,6 +880,7 @@ def test_node(node, runner=None, options=None):
                 result["country"] = geo.get("country")
                 loc_code = geo.get("country_code") or None
                 result["country_code"] = loc_code
+                result["ip_quality"] = geo.get("quality")
 
         if _cancelled(cancel):
             return result

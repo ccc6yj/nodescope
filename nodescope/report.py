@@ -32,6 +32,35 @@ def _unlock_tags_text(unlock):
     return Text(" ").join(tags) if tags else Text("-", style="dim")
 
 
+IP_RISK_NAMES = {"low": "低", "mid": "中", "high": "高"}
+
+
+def ip_label(q):
+    """IP 质量的简短标签：「家宽」「机房」「机房·代理」；无数据返回 None。"""
+    if not isinstance(q, dict) or not q.get("type"):
+        return None
+    return q["type"] + ("·代理" if q.get("proxy") else "")
+
+
+def ip_tip(q):
+    """IP 质量的悬停说明：风险等级 + ISP + ASN。"""
+    if not isinstance(q, dict):
+        return ""
+    parts = [f"风险{IP_RISK_NAMES.get(q.get('risk'), '?')}"]
+    if q.get("proxy"):
+        parts.append("已被标记为代理/VPN")
+    parts += [x for x in (q.get("isp"), q.get("asn")) if x]
+    return " | ".join(parts)
+
+
+def _ip_text(q):
+    label = ip_label(q)
+    if not label:
+        return Text("-", style="dim")
+    style = {"low": "green", "high": "yellow"}.get(q.get("risk"), "")
+    return Text(label, style=style)
+
+
 def print_report(results, top=None, show_unlock=False):
     """按速度/延迟排序打印结果表格（默认不展示解锁，勾选/指定时才展示）。"""
     ranked = sort_results(results)
@@ -39,12 +68,15 @@ def print_report(results, top=None, show_unlock=False):
         ranked = ranked[:top]
 
     has_unlock = show_unlock or any(bool(r.get("unlock")) for r in results)
+    has_ip = any(r.get("ip_quality") for r in results)
 
     table = Table(title="节点测试结果", show_lines=False)
     table.add_column("#", justify="right", style="dim")
     table.add_column("节点", overflow="fold")
     table.add_column("类型", style="cyan")
     table.add_column("落地", justify="center")
+    if has_ip:
+        table.add_column("IP", justify="center")
     if has_unlock:
         table.add_column("解锁", justify="center")
     table.add_column("延迟", justify="right")
@@ -85,6 +117,8 @@ def print_report(results, top=None, show_unlock=False):
             str(r.get("type", "?")),
             country_cell,
         ]
+        if has_ip:
+            row_cells.append(_ip_text(r.get("ip_quality")))
         if has_unlock:
             row_cells.append(_unlock_tags_text(r.get("unlock")))
         row_cells.extend([
@@ -272,6 +306,7 @@ def export_html(results, path, source=None, userinfo=None, show_unlock=False):
     now = datetime.now(timezone.utc).astimezone().strftime("%Y-%m-%d %H:%M:%S")
 
     has_unlock = show_unlock or any(bool(r.get("unlock")) for r in results)
+    has_ip = any(r.get("ip_quality") for r in results)
 
     ok_list = [r for r in results if r.get("ok")]
     speeds = [r["speed_mbps"] for r in results if r.get("speed_mbps") is not None]
@@ -303,12 +338,20 @@ def export_html(results, path, source=None, userinfo=None, show_unlock=False):
         lat_tip = f"{http_str} | {tcp_str}" if (http_str and tcp_str) else (http_str or tcp_str)
         lat_badge = f'<span data-tip="{esc(lat_tip)}">{_ms_badge(lat_val, 300, 800)}</span>' if lat_val is not None else '<span class="dim">-</span>'
         unlock_td = f'<td>{_unlock_badges_html(r.get("unlock"))}</td>' if has_unlock else ''
+        ip_td = ''
+        if has_ip:
+            q = r.get("ip_quality")
+            label = ip_label(q)
+            ip_cls = {"low": "good", "high": "mid"}.get((q or {}).get("risk"), "plain")
+            ip_td = (f'<td><span data-tip="{esc(ip_tip(q))}">{_badge(ip_cls, esc(label))}</span></td>'
+                     if label else '<td class="dim">-</td>')
         rows.append(
             "<tr>"
             f'<td class="num">{i}</td>'
             f"<td class='name'>{esc(r.get('name', '?'))}</td>"
             f"<td>{esc(str(r.get('type', '?')))}</td>"
             f"<td>{country}</td>"
+            f"{ip_td}"
             f"{unlock_td}"
             f"<td class='num'>{lat_badge}</td>"
             f"<td class='num'>{_speed_badge(r.get('speed_mbps'))}</td>"
@@ -328,6 +371,7 @@ def export_html(results, path, source=None, userinfo=None, show_unlock=False):
     body = "\n".join(rows)
 
     th_unlock = '<th data-k="unlock">解锁<span class="arrow"></span></th>' if has_unlock else ''
+    th_ip = '<th data-k="ip" title="出口 IP 类型与风险，悬停看 ISP / ASN">IP<span class="arrow"></span></th>' if has_ip else ''
     page = f"""<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -368,6 +412,7 @@ def export_html(results, path, source=None, userinfo=None, show_unlock=False):
   .badge.good {{ background: #12301f; color: #4ade80; }}
   .badge.mid {{ background: #332a10; color: #fbbf24; }}
   .badge.bad {{ background: #371a1a; color: #f87171; }}
+  .badge.plain {{ background: #1f2937; color: #cbd5e1; }}
   .icon-badge {{ display: inline-flex; border-radius: 4px; cursor: pointer; vertical-align: middle; transition: transform 0.12s ease; }}
   .icon-badge:hover {{ transform: scale(1.2); z-index: 10; }}
   [data-tip] {{ position: relative; cursor: default; }}
@@ -402,6 +447,7 @@ def export_html(results, path, source=None, userinfo=None, show_unlock=False):
       <th data-k="name">节点<span class="arrow"></span></th>
       <th data-k="type">类型<span class="arrow"></span></th>
       <th data-k="country">落地<span class="arrow"></span></th>
+      {th_ip}
       {th_unlock}
       <th data-k="latency" title="经节点端到端真实延迟（鼠标悬停查看直连入口延迟）">延迟<span class="arrow"></span></th>
       <th data-k="speed">下载速度<span class="arrow"></span></th>
