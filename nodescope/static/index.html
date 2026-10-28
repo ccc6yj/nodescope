@@ -349,6 +349,10 @@
   .sample tbody td { padding: 8px 12px; }
   .sample .speed-cell { min-width: 180px; }
   .sample-note { font-size: 12px; color: var(--ink-3); margin-top: 10px; }
+  .intro h2 .tag {
+    margin-left: 8px; padding: 1px 7px; border: 1px solid var(--rule); border-radius: 4px;
+    font-size: 11.5px; font-weight: 400; vertical-align: 1px;
+  }
 
   .steps { list-style: none; display: grid; gap: 0; border-top: 1px solid var(--rule); counter-reset: step; }
   .steps li {
@@ -414,13 +418,13 @@
         <div class="opt" title="同时测速的节点数。多个节点同时测会分抢本机带宽，快节点抢得多——所有节点都撞本机带宽上限、看不出差异时用">
           <span>同时测速</span>
           <div class="seg" role="radiogroup" aria-label="同时测速的节点数">
-            <label><input type="radio" name="speedConc" value="1" checked><span>1 个</span></label>
-            <label><input type="radio" name="speedConc" value="2"><span>2 个</span></label>
-            <label><input type="radio" name="speedConc" value="4"><span>4 个</span></label>
+            <label><input type="radio" name="speedConc" value="1" checked><span>1</span></label>
+            <label><input type="radio" name="speedConc" value="2"><span>2</span></label>
+            <label><input type="radio" name="speedConc" value="4"><span>4</span></label>
           </div>
         </div>
       </fieldset>
-      <div class="opt">
+      <div class="opt" title="同时探活的节点数，只影响测延迟/地区/解锁阶段的快慢，不影响测速结果">
         <span>探活并发</span>
         <div class="seg" role="radiogroup" aria-label="探活并发">
           <label><input type="radio" name="concurrency" value="4"><span>4</span></label>
@@ -436,7 +440,7 @@
         <div class="recent" id="recent"></div>
 
         <div>
-          <h2>结果预览</h2>
+          <h2>结果预览<span class="tag">示例</span></h2>
           <div class="sample" aria-hidden="true">
             <table style="--max:236.8">
               <thead><tr>
@@ -461,7 +465,7 @@
               </tbody>
             </table>
           </div>
-          <p class="sample-note">示例数据。测试结束后按下载速度排序，点击表头可换排序方式。</p>
+          <p class="sample-note">测试结束后按下载速度排序，点击表头可换排序方式。</p>
         </div>
       </div>
 
@@ -469,7 +473,7 @@
         <div>
           <h2>测试流程</h2>
           <ol class="steps">
-            <li><span><b>解析订阅</b>多种 UA 各拉一次合并去重，交给 mihomo 内核为每个节点开本地端口。</span></li>
+            <li><span><b>解析订阅</b>多种 UA 各拉一次合并去重，由 mihomo 为每个节点开本地端口。</span></li>
             <li><span><b>探活</b>按「探活并发」同时测 TCP / HTTP 延迟、落地地区和解锁情况。</span></li>
             <li><span><b>测速</b>探活通过的节点立即排队下载测速，「同时测速」控制并行数。</span></li>
             <li><span><b>导出</b>测完可导出可用节点（Clash YAML）或整张结果图。</span></li>
