@@ -257,7 +257,10 @@
   .num { font-variant-numeric: tabular-nums; }
   .dim { color: var(--ink-3); }
   .rank { color: var(--ink-3); width: 36px; font-size: 12.5px; }
-  .name { font-weight: 500; max-width: 300px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .name { font-weight: 500; white-space: nowrap; }
+  /* 限宽放在单元格内的块元素上：单元格自身的 max-width 规范未定义（Firefox 会忽略），
+     超长节点名会把整列撑开。窄屏时跟着收窄，把宽度让给速度列 */
+  .name-txt { max-width: clamp(160px, 26vw, 300px); overflow: hidden; text-overflow: ellipsis; }
   .type { color: var(--ink-2); font-size: 12.5px; }
   .country { font-weight: 500; font-size: 13px; }
 
@@ -806,7 +809,7 @@ function render(r) {
     ? `<span class="country">${esc(r.country)}</span>`
     : '<span class="dim">-</span>';
   return `<td class="num rank"></td>` +
-    `<td class="name" title="${esc(r.name)}">${esc(r.name)}</td>` +
+    `<td class="name"><div class="name-txt" title="${esc(r.name)}">${esc(r.name)}</div></td>` +
     `<td class="type">${esc(r.type || '?')}</td>` +
     `<td>${countryCell}</td>` +
     `<td>${renderUnlock(r.unlock)}</td>` +
@@ -1274,7 +1277,7 @@ function setupEventSource(stream) {
       const tr = document.createElement('tr');
       tr.className = 'pending';
       tr.innerHTML = `<td class="num rank">${i + 1}</td>` +
-        `<td class="name" title="${esc(n.name)}">${esc(n.name)}</td>` +
+        `<td class="name"><div class="name-txt" title="${esc(n.name)}">${esc(n.name)}</div></td>` +
         `<td class="type">${esc(n.type)}</td><td class="dim">-</td>` +
         `<td class="dim">-</td>` +
         `<td class="dim latency-cell">-</td>` +
