@@ -340,16 +340,26 @@ class MihomoRunner:
             "listeners": listeners,
         }
         # 绑定物理网卡 + 独立 DNS，避免本机 TUN 把出站/解析劫持进 fake-ip。
-        # Windows 上探测到的是网卡 IP 而非名字，mihomo 的 interface-name 只认名字，此时不绑定
+        # Windows 上探测到的是网卡 IP 而非名字，mihomo 的 interface-name 只认名字，此时不绑定。
+        # 但 DNS 必须照配：系统解析器被 Clash TUN 劫持后只返回 198.18.0.0/15，
+        # 内核会把这些地址当作无效 IP 丢掉（dns resolve failed: couldn't find ip），
+        # 表现为全部节点延迟和测速都失败。未绑网卡时不能用 UDP 53（同样会被 dns-hijack），
+        # 改走 443 的 DoH，才能拿到真实地址。
+        nameserver = [
+            "https://dns.alidns.com/dns-query",
+            "https://1.1.1.1/dns-query",
+        ]
         if self.iface and not _is_ip(self.iface):
             cfg["interface-name"] = self.iface
-            cfg["dns"] = {
-                "enable": True,
-                "ipv6": True,
-                "use-system-hosts": False,
-                "enhanced-mode": "redir-host",
-                "nameserver": ["1.1.1.1", "8.8.8.8"],
-            }
+            # 已绑物理网卡，UDP 53 不会进 TUN；放在前面，比 DoH 少一次 TLS
+            nameserver = ["1.1.1.1", "8.8.8.8"] + nameserver
+        cfg["dns"] = {
+            "enable": True,
+            "ipv6": True,
+            "use-system-hosts": False,
+            "enhanced-mode": "redir-host",
+            "nameserver": nameserver,
+        }
         return cfg
 
     def _start(self):

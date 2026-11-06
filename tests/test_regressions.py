@@ -36,6 +36,8 @@
 32. webapp 首页外部资源   —— 字体与解锁图标走 Google Fonts / jsdelivr，国内加载失败且暴露测速行为
 33. subscription.parse   —— proxies 位于 2000 字符后或仅含 provider 时被误判为非 YAML，明文提取把 geox-url 等抓出报 "暂不支持协议 geoip: 'https://"；
                             且不能矫枉过正：URI 里含 "proxies" 子串不得当成 YAML，明文兜底不得截断带空格/括号的节点名
+34. core.MihomoRunner     —— Windows 上 iface 是 IP 时不写 interface-name，连 DNS 也不配；本机 Clash TUN 把系统 DNS
+                            劫持成 198.18 fake-ip 后，节点域名解析失败，延迟和测速全部失败
 """
 
 import base64
@@ -1044,9 +1046,20 @@ class TestIfaceCache(unittest.TestCase):
 
     def test_mihomo_skips_ip_as_interface_name(self):
         r = core.MihomoRunner([{"name": "a", "type": "socks5"}], iface="192.168.1.2")
-        self.assertNotIn("interface-name", r._build_config())
+        cfg = r._build_config()
+        self.assertNotIn("interface-name", cfg)
+        # 未绑网卡也必须自建 DNS，且不能用 UDP 53（会被 TUN 劫持成 fake-ip）
+        dns = cfg["dns"]
+        self.assertTrue(dns["enable"])
+        self.assertEqual(dns["enhanced-mode"], "redir-host")
+        self.assertFalse(dns["use-system-hosts"])
+        self.assertTrue(dns["nameserver"])
+        for ns in dns["nameserver"]:
+            self.assertTrue(ns.startswith("https://") or ns.startswith("tls://"), ns)
         r = core.MihomoRunner([{"name": "a", "type": "socks5"}], iface="en0")
-        self.assertEqual(r._build_config()["interface-name"], "en0")
+        cfg = r._build_config()
+        self.assertEqual(cfg["interface-name"], "en0")
+        self.assertEqual(cfg["dns"]["nameserver"][0], "1.1.1.1")
 
 
 class TestWebParams(unittest.TestCase):
