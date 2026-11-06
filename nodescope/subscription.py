@@ -92,7 +92,8 @@ def _node_key(node):
     return (
         node.get("name"),
         node.get("type"),
-        str(node.get("server") or ""),
+        # 域名不区分大小写；同一节点在 YAML 里写 tk-X07、URI 解析后是 tk-x07，不归一会重复出现 “#2”
+        str(node.get("server") or "").lower(),
         str(node.get("port") or ""),
     )
 
@@ -696,6 +697,166 @@ def _apply_uri_transport(proxy, q):
             h2_opts["host"] = [q["host"]]
         if h2_opts:
             proxy["h2-opts"] = h2_opts
+    elif net in ("xhttp", "splithttp"):  # splithttp 是 xhttp 的旧名
+        # mihomo 只有 vless 实现了 xhttp；别的协议写上也会被静默当成 tcp，必然连不上
+        if proxy.get("type") != "vless":
+            raise UnsupportedNode(f"{proxy.get('type')} 不支持 xhttp 传输（mihomo 仅 vless 支持）")
+        proxy["network"] = "xhttp"
+        opts = {}
+        for key in ("path", "host", "mode"):
+            if q.get(key):
+                opts[key] = q[key]
+        if q.get("extra"):
+            try:
+                extra = json.loads(q["extra"])
+            except ValueError:
+                extra = None
+            if isinstance(extra, dict):
+                _xhttp_opts_from_extra(extra, opts)
+        proxy["xhttp-opts"] = opts
+
+
+# xray 分享链接 extra(JSON) 与 mihomo xhttp-opts 的字段对应，对齐 mihomo common/convert/v.go
+_XHTTP_EXTRA_FIELDS = (
+    ("headers", "headers"),
+    ("noGRPCHeader", "no-grpc-header"),
+    ("xPaddingBytes", "x-padding-bytes"),
+    ("xPaddingObfsMode", "x-padding-obfs-mode"),
+    ("xPaddingKey", "x-padding-key"),
+    ("xPaddingHeader", "x-padding-header"),
+    ("xPaddingPlacement", "x-padding-placement"),
+    ("xPaddingMethod", "x-padding-method"),
+    ("uplinkHTTPMethod", "uplink-http-method"),
+    ("sessionIDPlacement", "session-placement"),
+    ("sessionPlacement", "session-placement"),
+    ("sessionIDKey", "session-key"),
+    ("sessionKey", "session-key"),
+    ("sessionIDTable", "session-table"),
+    ("sessionIDLength", "session-length"),
+    ("seqPlacement", "seq-placement"),
+    ("seqKey", "seq-key"),
+    ("uplinkDataPlacement", "uplink-data-placement"),
+    ("uplinkDataKey", "uplink-data-key"),
+    ("uplinkChunkSize", "uplink-chunk-size"),
+    ("scMaxEachPostBytes", "sc-max-each-post-bytes"),
+    ("scMinPostsIntervalMs", "sc-min-posts-interval-ms"),
+)
+_XMUX_FIELDS = (
+    ("maxConnections", "max-connections"),
+    ("maxConcurrency", "max-concurrency"),
+    ("cMaxReuseTimes", "c-max-reuse-times"),
+    ("hMaxRequestTimes", "h-max-request-times"),
+    ("hMaxReusableSecs", "h-max-reusable-secs"),
+    ("hKeepAlivePeriod", "h-keep-alive-period"),
+)
+
+
+def _map_fields(src, dst, fields):
+    """按 (源字段, 目标字段) 表复制非空值；同一目标字段先到先得（兼容新旧两种字段名）。"""
+    for s_key, d_key in fields:
+        val = src.get(s_key)
+        if val is None or val == "" or val == {} or d_key in dst:
+            continue
+        # JSON 里的整数解析成 float 时转回 int，避免写进 YAML 变成 100.0
+        if isinstance(val, float) and val.is_integer():
+            val = int(val)
+        dst[d_key] = val
+
+
+def _xhttp_opts_from_extra(extra, opts):
+    """把 xray extra JSON 映射为 mihomo xhttp-opts（含 xmux 与 downloadSettings）。"""
+    _map_fields(extra, opts, _XHTTP_EXTRA_FIELDS)
+    if isinstance(extra.get("xmux"), dict):
+        reuse = {}
+        _map_fields(extra["xmux"], reuse, _XMUX_FIELDS)
+        if reuse:
+            opts["reuse-settings"] = reuse
+
+    ds_src = extra.get("downloadSettings")
+    if not isinstance(ds_src, dict):
+        return
+    ds = {}
+    if ds_src.get("address"):
+        ds["server"] = ds_src["address"]
+    if ds_src.get("port"):
+        ds["port"] = int(ds_src["port"])
+    security = str(ds_src.get("security") or "").lower()
+    if security in ("tls", "reality"):
+        ds["tls"] = True
+        tls = ds_src.get("tlsSettings") if isinstance(ds_src.get("tlsSettings"), dict) else {}
+        if tls.get("serverName"):
+            ds["servername"] = tls["serverName"]
+        if tls.get("fingerprint"):
+            ds["client-fingerprint"] = tls["fingerprint"]
+        if isinstance(tls.get("alpn"), list) and tls["alpn"]:
+            ds["alpn"] = [str(a) for a in tls["alpn"]]
+        if tls.get("allowInsecure") is True:
+            ds["skip-cert-verify"] = True
+        reality = ds_src.get("realitySettings")
+        if security == "reality" and isinstance(reality, dict):
+            r_opts = {}
+            if reality.get("publicKey"):
+                r_opts["public-key"] = reality["publicKey"]
+            if reality.get("shortId"):
+                r_opts["short-id"] = reality["shortId"]
+            if r_opts:
+                ds["reality-opts"] = r_opts
+    xs = ds_src.get("xhttpSettings")
+    if isinstance(xs, dict):
+        _map_fields(xs, ds, (("path", "path"), ("host", "host"), ("headers", "headers")))
+        xs_extra = xs.get("extra")
+        if isinstance(xs_extra, dict) and isinstance(xs_extra.get("xmux"), dict):
+            reuse = {}
+            _map_fields(xs_extra["xmux"], reuse, _XMUX_FIELDS)
+            if reuse:
+                ds["reuse-settings"] = reuse
+    if ds:
+        opts["download-settings"] = ds
+
+
+def _xhttp_extra_from_opts(opts):
+    """_xhttp_opts_from_extra 的逆过程，导出分享链接时用；不能还原的字段会丢失连通性。"""
+    extra = {}
+    for s_key, d_key in _XHTTP_EXTRA_FIELDS:
+        if d_key in opts and s_key not in ("sessionPlacement", "sessionKey"):
+            extra[s_key] = opts[d_key]
+    if isinstance(opts.get("reuse-settings"), dict):
+        xmux = {s: opts["reuse-settings"][d] for s, d in _XMUX_FIELDS if d in opts["reuse-settings"]}
+        if xmux:
+            extra["xmux"] = xmux
+    ds = opts.get("download-settings")
+    if isinstance(ds, dict):
+        ds_out = {}
+        if ds.get("server"):
+            ds_out["address"] = ds["server"]
+        if ds.get("port"):
+            ds_out["port"] = ds["port"]
+        if ds.get("tls"):
+            ds_out["security"] = "reality" if ds.get("reality-opts") else "tls"
+            tls = {}
+            for src, dst in (("servername", "serverName"), ("client-fingerprint", "fingerprint"), ("alpn", "alpn")):
+                if ds.get(src):
+                    tls[dst] = ds[src]
+            if ds.get("skip-cert-verify"):
+                tls["allowInsecure"] = True
+            if tls:
+                ds_out["tlsSettings"] = tls
+            r_opts = ds.get("reality-opts")
+            if isinstance(r_opts, dict):
+                ds_out["realitySettings"] = {
+                    "publicKey": r_opts.get("public-key", ""),
+                    "shortId": r_opts.get("short-id", ""),
+                }
+        xs = {k: ds[k] for k in ("path", "host", "headers") if ds.get(k)}
+        if isinstance(ds.get("reuse-settings"), dict):
+            xmux = {s: ds["reuse-settings"][d] for s, d in _XMUX_FIELDS if d in ds["reuse-settings"]}
+            if xmux:
+                xs["extra"] = {"xmux": xmux}
+        if xs:
+            ds_out["xhttpSettings"] = xs
+        if ds_out:
+            extra["downloadSettings"] = ds_out
+    return extra
 
 
 def _parse_vless(uri):
@@ -715,6 +876,9 @@ def _parse_vless(uri):
     }
     if q.get("flow"):
         proxy["flow"] = q["flow"]
+    # VLESS Encryption（如 mlkem768x25519plus.native...）：服务端开启时客户端必须一致，"none" 等同不加密
+    if q.get("encryption") and q["encryption"].lower() != "none":
+        proxy["encryption"] = q["encryption"]
     security = q.get("security", "").lower()
     if security in ("tls", "reality"):
         proxy["tls"] = True
@@ -722,6 +886,11 @@ def _parse_vless(uri):
             proxy["servername"] = q["sni"]
         if q.get("fp"):
             proxy["client-fingerprint"] = q["fp"]
+        # XHTTP H3 节点靠 alpn=h3 才会走 HTTP/3(QUIC)，丢掉就会用 TCP 去连只开了 UDP 的端口
+        if q.get("alpn"):
+            proxy["alpn"] = [a for a in q["alpn"].split(",") if a]
+        if q.get("allowInsecure") in ("1", "true") or q.get("insecure") in ("1", "true"):
+            proxy["skip-cert-verify"] = True
         if security == "reality":
             if not q.get("pbk"):
                 raise ValueError("reality 节点缺少 public-key")
@@ -900,6 +1069,15 @@ def _uri_transport_params(params, node):
                 params["host"] = host[0]
             elif isinstance(host, str) and host:
                 params["host"] = host
+    elif net == "xhttp":
+        opts = node.get("xhttp-opts")
+        if isinstance(opts, dict):
+            for key in ("path", "host", "mode"):
+                if opts.get(key):
+                    params[key] = opts[key]
+            extra = _xhttp_extra_from_opts(opts)
+            if extra:
+                params["extra"] = json.dumps(extra, ensure_ascii=False, separators=(",", ":"))
 
 
 def node_to_uri(node):
@@ -966,6 +1144,12 @@ def node_to_uri(node):
             params["flow"] = node["flow"]
         if node.get("client-fingerprint"):
             params["fp"] = node["client-fingerprint"]
+        if node.get("encryption"):
+            params["encryption"] = node["encryption"]
+        if node.get("alpn"):
+            params["alpn"] = ",".join(node["alpn"]) if isinstance(node["alpn"], list) else str(node["alpn"])
+        if node.get("skip-cert-verify"):
+            params["allowInsecure"] = "1"
         _uri_transport_params(params, node)
         reality = node.get("reality-opts")
         if reality and isinstance(reality, dict):
@@ -1084,6 +1268,9 @@ def node_to_singbox(node):
     name = node.get("name") or "node"
     server = node.get("server") or ""
     port = int(node.get("port") or 443)
+    # sing-box 没有 xhttp 传输，照常导出会退化成裸 tcp 连不上，交给调用方计入“跳过”
+    if (node.get("network") or "").lower() == "xhttp":
+        return None
 
     outbound = {
         "tag": name,
@@ -1131,6 +1318,9 @@ def node_to_singbox(node):
         return outbound
 
     if t == "vless":
+        # sing-box 不支持 VLESS Encryption，导出后必然握手失败
+        if node.get("encryption") and str(node["encryption"]).lower() != "none":
+            return None
         outbound["type"] = "vless"
         outbound["uuid"] = node.get("uuid", "")
         if node.get("flow"):
@@ -1139,6 +1329,10 @@ def node_to_singbox(node):
             tls_cfg = {"enabled": True}
             if node.get("servername"):
                 tls_cfg["server_name"] = node["servername"]
+            if node.get("skip-cert-verify"):
+                tls_cfg["insecure"] = True
+            if node.get("alpn"):
+                tls_cfg["alpn"] = node["alpn"] if isinstance(node["alpn"], list) else [node["alpn"]]
             reality = node.get("reality-opts")
             if isinstance(reality, dict):
                 reality_cfg = {"enabled": True}

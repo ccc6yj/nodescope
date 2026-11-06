@@ -803,6 +803,18 @@ def local_bandwidth_mbps(seconds=3, threads=4, timeout=6, iface=None, cancel_eve
     return round(best, 1) if best >= 1 else None
 
 
+_UDP_TYPES = {"hysteria", "hysteria2", "hy2", "tuic", "wireguard"}
+
+
+def _tcp_transport(node):
+    """节点是否走 TCP 连接服务器。UDP 协议和 HTTP/3 节点的端口没开 TCP 是正常的，TCP 探测失败说明不了问题。"""
+    if str(node.get("type") or "").lower() in _UDP_TYPES:
+        return False
+    alpn = node.get("alpn")
+    alpn = alpn if isinstance(alpn, list) else [alpn]
+    return "h3" not in alpn
+
+
 def test_node(node, runner=None, options=None):
     """测试单个节点，返回结果字典。线程安全：每个节点独占本地端口。"""
     opts = options or {}
@@ -865,7 +877,15 @@ def test_node(node, runner=None, options=None):
                 result["http_ms"] = round(http_latency(port, timeout=timeout), 1)
                 result["ok"] = True
             except Exception as e:  # noqa: BLE001
-                result["error"] = f"HTTP 测试失败: {e}"
+                if result["tcp_ms"] is None and _tcp_transport(node):
+                    # TCP 直连都不通，问题在服务器可达性而不是协议/配置，单独说明，
+                    # 免得用户以为是 nodescope 不支持该协议
+                    result["error"] = (
+                        f"服务器连不上: 本机直连 {node.get('server')}:{node.get('port')} 的 TCP 超时，"
+                        f"节点 IP 可能被墙或已下线（经节点请求也失败: {e}）"
+                    )
+                else:
+                    result["error"] = f"HTTP 测试失败: {e}"
                 return result
 
         if _cancelled(cancel):

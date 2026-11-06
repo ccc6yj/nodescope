@@ -4,7 +4,7 @@
 #
 # 可选环境变量：
 #   NS_MIHOMO_BIN      已有的 mihomo 路径（设置后不再查找/下载）
-#   NS_MIHOMO_VERSION  下载的 mihomo 版本（默认见下方 MIHOMO_VERSION）
+#   NS_MIHOMO_VERSION  固定下载的 mihomo 版本，如 v1.19.33（默认自动跟随最新正式版）
 #   NS_GITHUB_PROXY    GitHub 下载加速前缀，如 https://ghfast.top/
 #   PIP_INDEX_URL      pip 镜像，如 https://pypi.tuna.tsinghua.edu.cn/simple
 set -euo pipefail
@@ -13,7 +13,10 @@ cd "$(dirname "$0")"
 ROOT="$(pwd)"
 VENV="$ROOT/.venv"
 BIN_DIR="$ROOT/bin"
-MIHOMO_VERSION="${NS_MIHOMO_VERSION:-v1.19.31}"
+# 查不到最新版本又没有任何可用内核时，才退回下载这个版本
+FALLBACK_MIHOMO_VERSION="v1.19.33"
+# 最新版本号的缓存：一天内只联网查一次，避免每次启动都等 GitHub
+LATEST_CACHE="$BIN_DIR/.mihomo-latest"
 
 info() { printf '\033[36m==>\033[0m %s\n' "$*"; }
 die()  { printf '\033[31m错误：\033[0m%s\n' "$*" >&2; exit 1; }
@@ -48,57 +51,106 @@ if ! cmp -s "$ROOT/requirements.txt" "$STAMP"; then
 fi
 
 # ---------- 3. mihomo 内核 ----------
-find_mihomo() {
-  if [ -n "${NS_MIHOMO_BIN:-}" ] && [ -x "$NS_MIHOMO_BIN" ]; then echo "$NS_MIHOMO_BIN"; return; fi
-  for name in mihomo clash-meta; do
-    if command -v "$name" >/dev/null 2>&1; then command -v "$name"; return; fi
+# 默认使用项目 bin/ 下的内核并保持为最新正式版（旧内核缺新协议，如 xhttp 需 v1.19.22+）；
+# 设置 NS_MIHOMO_BIN 时完全尊重用户选择，不查找也不下载。
+
+# 打印内核版本号（如 v1.19.33）；alpha 版或无法运行时输出空
+mihomo_version() {
+  { "$1" -v 2>/dev/null || true; } |
+    sed -n 's/.*Meta v\{0,1\}\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\).*/v\1/p' | head -n 1 || true
+}
+
+# 查询 GitHub 最新正式版的 tag：releases/latest 会 302 到 .../tag/vX.Y.Z，
+# 不走 API，避免匿名调用的频率限制。失败时输出空
+resolve_latest() {
+  local base="https://github.com/MetaCubeX/mihomo/releases/latest" prefix loc tag
+  if [ -f "$LATEST_CACHE" ] && [ -n "$(find "$LATEST_CACHE" -mmin -1440 2>/dev/null)" ]; then
+    cat "$LATEST_CACHE"; return
+  fi
+  command -v curl >/dev/null 2>&1 || return 0
+  # 设置了加速前缀时先走前缀，再直连兜底
+  for prefix in ${NS_GITHUB_PROXY:+"$NS_GITHUB_PROXY"} ""; do
+    loc="$(curl -sS -o /dev/null --connect-timeout 5 -m 10 -w '%{redirect_url}' "$prefix$base" 2>/dev/null || true)"
+    tag="${loc##*/tag/}"
+    if [ "$tag" != "$loc" ] && printf '%s' "$tag" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+      mkdir -p "$BIN_DIR" && printf '%s\n' "$tag" > "$LATEST_CACHE"
+      echo "$tag"; return
+    fi
   done
-  if [ -x "$BIN_DIR/mihomo" ]; then echo "$BIN_DIR/mihomo"; fi
   return 0
 }
 
+# 下载指定版本到 bin/mihomo；成功返回 0，失败只打印原因并返回 1，由调用方决定是否退出
 download_mihomo() {
-  local os arch asset url tmp
+  local version="$1" os arch asset url tmp
   case "$(uname -s)" in
     Darwin) os=darwin ;;
     Linux)  os=linux ;;
-    *) die "当前系统不支持自动下载 mihomo，请手动下载后设置 NS_MIHOMO_BIN" ;;
+    *) echo "当前系统不支持自动下载 mihomo，请手动下载后设置 NS_MIHOMO_BIN" >&2; return 1 ;;
   esac
   case "$(uname -m)" in
     arm64|aarch64) arch=arm64 ;;
     # compatible 版不依赖较新的 CPU 指令集，老机器也能跑
     x86_64|amd64)  arch=amd64-compatible ;;
-    *) die "不支持的 CPU 架构 $(uname -m)，请手动下载 mihomo 后设置 NS_MIHOMO_BIN" ;;
+    *) echo "不支持的 CPU 架构 $(uname -m)，请手动下载 mihomo 后设置 NS_MIHOMO_BIN" >&2; return 1 ;;
   esac
-  asset="mihomo-$os-$arch-$MIHOMO_VERSION.gz"
-  url="${NS_GITHUB_PROXY:-}https://github.com/MetaCubeX/mihomo/releases/download/$MIHOMO_VERSION/$asset"
-  command -v curl >/dev/null 2>&1 || die "需要 curl 来下载 mihomo"
+  command -v curl >/dev/null 2>&1 || { echo "需要 curl 来下载 mihomo" >&2; return 1; }
+  asset="mihomo-$os-$arch-$version.gz"
+  url="${NS_GITHUB_PROXY:-}https://github.com/MetaCubeX/mihomo/releases/download/$version/$asset"
 
-  info "下载 mihomo $MIHOMO_VERSION（$os/$arch）"
+  info "下载 mihomo ${version}（$os/${arch}）"
   mkdir -p "$BIN_DIR"
   tmp="$(mktemp "$BIN_DIR/.mihomo.XXXXXX")"
   # 下载中途 Ctrl+C 或解压失败时，不在 bin/ 里留下半成品
   trap 'rm -f "$tmp" "$tmp.gz"' EXIT
   if ! curl -fL --retry 2 --connect-timeout 15 --progress-bar -o "$tmp.gz" "$url"; then
-    rm -f "$tmp" "$tmp.gz"
-    die "下载失败：$url
-  访问 GitHub 慢可设置加速前缀后重试，如：NS_GITHUB_PROXY=https://ghfast.top/ ./start.sh
-  也可以手动安装（macOS：brew install mihomo）"
+    rm -f "$tmp" "$tmp.gz"; trap - EXIT
+    echo "下载失败：$url
+  访问 GitHub 慢可设置加速前缀后重试，如：NS_GITHUB_PROXY=https://ghfast.top/ ./start.sh" >&2
+    return 1
   fi
-  gunzip -c "$tmp.gz" > "$tmp" && rm -f "$tmp.gz"
-  chmod +x "$tmp"
-  "$tmp" -v >/dev/null 2>&1 || { rm -f "$tmp"; die "下载的 mihomo 无法运行，请手动安装后设置 NS_MIHOMO_BIN"; }
+  if ! gunzip -c "$tmp.gz" > "$tmp" || ! chmod +x "$tmp" || ! "$tmp" -v >/dev/null 2>&1; then
+    rm -f "$tmp" "$tmp.gz"; trap - EXIT
+    echo "下载的 mihomo 无法运行" >&2
+    return 1
+  fi
+  rm -f "$tmp.gz"
+  # 先写临时文件再整体替换，替换前即使失败也不会破坏原有可用的内核
   mv "$tmp" "$BIN_DIR/mihomo"
   trap - EXIT
 }
 
-MIHOMO="$(find_mihomo)"
-if [ -z "$MIHOMO" ]; then
-  download_mihomo
-  MIHOMO="$BIN_DIR/mihomo"
+if [ -n "${NS_MIHOMO_BIN:-}" ]; then
+  [ -x "$NS_MIHOMO_BIN" ] || die "NS_MIHOMO_BIN 指向的文件不存在或不可执行：$NS_MIHOMO_BIN"
+  MIHOMO="$NS_MIHOMO_BIN"
+else
+  LOCAL="$BIN_DIR/mihomo"
+  WANT="${NS_MIHOMO_VERSION:-$(resolve_latest)}"
+  case "$WANT" in [0-9]*) WANT="v$WANT" ;; esac  # 允许写成 1.19.33
+  HAVE=""
+  [ -x "$LOCAL" ] && HAVE="$(mihomo_version "$LOCAL")"
+  if [ -n "$WANT" ] && [ "$HAVE" != "$WANT" ]; then
+    [ -n "$HAVE" ] && info "内核 $HAVE 有新版本 ${WANT}，开始更新"
+    download_mihomo "$WANT" || true
+  elif [ -z "$WANT" ] && [ ! -x "$LOCAL" ]; then
+    # 查不到最新版本（离线/GitHub 不可达）且本地没有内核：下载内置的兜底版本
+    download_mihomo "$FALLBACK_MIHOMO_VERSION" || true
+  fi
+
+  if [ -x "$LOCAL" ]; then
+    MIHOMO="$LOCAL"
+  else
+    # 下载失败时退回系统里已装的内核，能用总比启动不了好
+    MIHOMO=""
+    for name in mihomo clash-meta; do
+      if command -v "$name" >/dev/null 2>&1; then MIHOMO="$(command -v "$name")"; break; fi
+    done
+    [ -n "$MIHOMO" ] || die "没有可用的 mihomo 内核。可设置 NS_GITHUB_PROXY 后重试，或手动安装（macOS：brew install mihomo）"
+    printf '\033[33m提示：\033[0m未能下载最新内核，改用系统内核（版本过旧时 xhttp 等新协议不可用）\n' >&2
+  fi
 fi
 export NS_MIHOMO_BIN="$MIHOMO"
-info "使用内核 $MIHOMO"
+info "使用内核 $MIHOMO $(mihomo_version "$MIHOMO")"
 
 # ---------- 4. 启动 ----------
 # macOS 自带 Python 链接的是 LibreSSL，urllib3 v2 会打印一条无害的兼容性警告，这里屏蔽掉

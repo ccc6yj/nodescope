@@ -230,19 +230,47 @@ class MihomoError(Exception):
     pass
 
 
+# 低于此版本的 mihomo 不认识 network: xhttp，且不报错，而是静默按裸 tcp 发 vless，
+# 表现为 TCP 延迟正常、HTTP 测试全部失败
+XHTTP_MIN_VERSION = (1, 19, 22)
+_VERSION_RE = re.compile(r"Meta\s+v?(\d+)\.(\d+)\.(\d+)")
+_VERSION_CACHE = {}
+
+
+def kernel_version(binary):
+    """返回内核版本 (主, 次, 修订)；alpha 版或无法识别时返回 None（按最新版对待）。"""
+    if binary in _VERSION_CACHE:
+        return _VERSION_CACHE[binary]
+    version = None
+    try:
+        out = subprocess.run(
+            [binary, "-v"], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=10, check=False,
+        ).stdout.decode("utf-8", "replace")
+        m = _VERSION_RE.search(out)
+        if m:
+            version = tuple(int(x) for x in m.groups())
+    except Exception:  # noqa: BLE001 - 取不到版本不影响测试，按最新版处理
+        pass
+    _VERSION_CACHE[binary] = version
+    return version
+
+
 def find_binary():
-    """按优先级查找可用的 mihomo 内核。"""
+    """按优先级查找可用的 mihomo 内核：NS_MIHOMO_BIN → 项目 bin/ → PATH。
+
+    bin/ 里是 start.sh 自动下载并保持最新的内核，优先于 PATH：系统里装的内核
+    （如 brew）常常版本较旧，缺 xhttp 等新协议，且旧内核遇到不认识的配置不会报错。
+    """
     env_bin = os.environ.get("NS_MIHOMO_BIN")
     if env_bin and os.path.isfile(env_bin) and os.access(env_bin, os.X_OK):
         return env_bin
-    for name in CANDIDATE_BINARIES:
-        path = shutil.which(name)
-        if path:
-            return path
-    # start.sh 自动下载的内核放在项目根目录 bin/ 下，直接运行 run.py 时也能找到
     for name in ("mihomo", "mihomo.exe"):
         path = os.path.join(LOCAL_BIN_DIR, name)
         if os.path.isfile(path) and os.access(path, os.X_OK):
+            return path
+    for name in CANDIDATE_BINARIES:
+        path = shutil.which(name)
+        if path:
             return path
     return None
 
@@ -270,10 +298,11 @@ class MihomoRunner:
     def __enter__(self):
         if not self.binary:
             raise MihomoError(
-                "未找到 mihomo 内核。请安装：brew install mihomo\n"
-                "或通过环境变量 NS_MIHOMO_BIN 指定内核路径"
+                "未找到 mihomo 内核。用 ./start.sh（Windows: start.bat）启动会自动下载最新内核，\n"
+                "或手动安装（brew install mihomo）、通过环境变量 NS_MIHOMO_BIN 指定内核路径"
             )
         cleanup_stale()
+        self._reject_unsupported_transports()
         try:
             self._start_skipping_bad_proxies()
         except Exception:
@@ -302,6 +331,26 @@ class MihomoRunner:
                 if not self.proxies:
                     raise MihomoError(f"所有节点都被 mihomo 拒绝，最后一个原因: {reason}") from e
         raise MihomoError(f"非法节点过多（已剔除 {len(self.rejected)} 个），放弃启动")
+
+    def _reject_unsupported_transports(self):
+        """旧内核不支持 xhttp 却不报错，提前剔除这些节点并给出升级提示，免得误报成“HTTP 测试失败”。"""
+        version = kernel_version(self.binary)
+        if version is None or version >= XHTTP_MIN_VERSION:
+            return
+        reason = (
+            f"内核 mihomo {'.'.join(map(str, version))} 不支持 xhttp 传输，"
+            f"请升级到 v{'.'.join(map(str, XHTTP_MIN_VERSION))} 及以上（当前内核: {self.binary}；"
+            f"用 ./start.sh 启动会自动下载最新内核）"
+        )
+        keep = []
+        for p in self.proxies:
+            if str(p.get("network") or "").lower() == "xhttp":
+                self.rejected[p.get("name") or "?"] = reason
+            else:
+                keep.append(p)
+        if not keep:
+            raise MihomoError(reason)
+        self.proxies = keep
 
     def _bad_proxy(self, message):
         """从启动失败信息中识别出非法节点，返回 (下标, 原因) 或 None。"""

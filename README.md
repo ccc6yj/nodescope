@@ -35,8 +35,11 @@ start.bat                 # Windows，也可以直接双击（内部调用 start
 只需要系统里有 Python 3.8+（macOS / Linux 另需 curl，Windows 用系统自带的 PowerShell 下载）。脚本会自动：
 
 1. 在 `.venv/` 建虚拟环境并安装依赖（`requirements.txt` 没变就跳过）
-2. 找 mihomo 内核：`NS_MIHOMO_BIN` → PATH 里的 `mihomo`/`clash-meta` → 项目 `bin/mihomo`；
-   都没有就按系统和架构从 GitHub 下载到 `bin/`（版本可用 `NS_MIHOMO_VERSION` 指定）
+2. 准备 mihomo 内核：默认把 GitHub 最新正式版下载到项目 `bin/`，之后每天最多检查一次更新，
+   本地版本落后就自动替换（旧内核缺新协议，如 xhttp 需 v1.19.22+）。
+   - 设置 `NS_MIHOMO_BIN` 时直接用指定内核，不查找也不下载
+   - `NS_MIHOMO_VERSION=v1.19.33` 可固定版本，不再跟随最新
+   - 离线或下载失败时沿用 `bin/` 里已有的内核；连它都没有，才退回 PATH 里的 `mihomo`/`clash-meta`
 3. 启动 Web 界面
 
 网络慢时可加速：
@@ -56,9 +59,10 @@ start.bat
 ## 手动安装
 
 ```bash
-# 1. mihomo 内核（已装可跳过）
+# 1. mihomo 内核（已装可跳过；查找顺序 NS_MIHOMO_BIN → 项目 bin/ → PATH）
 brew install mihomo
 # 或指定内核路径: export NS_MIHOMO_BIN=/path/to/mihomo
+# 注意：xhttp 等新协议需要 v1.19.22+，系统内核过旧时这类节点会被标注为不支持
 
 # 2. Python 依赖
 pip3 install -r requirements.txt

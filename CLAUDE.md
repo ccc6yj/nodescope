@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 项目概述
 
-nodescope：对机场订阅节点批量测延迟（TCP 直连 / HTTP 经节点）、下载速度、落地地区与流媒体/AI 解锁。本地**不实现任何代理协议**，全部交给 mihomo (Clash.Meta) 内核落地。`core.find_binary` 查找顺序：`NS_MIHOMO_BIN` → PATH → 项目根目录 `bin/`（`start.sh` 自动下载的位置，已 gitignore）。
+nodescope：对机场订阅节点批量测延迟（TCP 直连 / HTTP 经节点）、下载速度、落地地区与流媒体/AI 解锁。本地**不实现任何代理协议**，全部交给 mihomo (Clash.Meta) 内核落地。`core.find_binary` 查找顺序：`NS_MIHOMO_BIN` → 项目根目录 `bin/` → PATH。`bin/`（已 gitignore）由 `start.sh`/`start.ps1` 维护为 GitHub 最新正式版（`releases/latest` 302 跳转取 tag，结果缓存在 `bin/.mihomo-latest` 一天），优先于 PATH 是因为系统内核常过旧。mihomo < 1.19.22 不认识 `network: xhttp` 且**不报错**（静默按裸 tcp 发），`MihomoRunner` 启动前按 `kernel_version()` 剔除这类节点并记入 `rejected`。
 
 ## 常用命令
 

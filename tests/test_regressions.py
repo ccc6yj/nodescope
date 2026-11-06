@@ -38,6 +38,14 @@
                             且不能矫枉过正：URI 里含 "proxies" 子串不得当成 YAML，明文兜底不得截断带空格/括号的节点名
 34. core.MihomoRunner     —— Windows 上 iface 是 IP 时不写 interface-name，连 DNS 也不配；本机 Clash TUN 把系统 DNS
                             劫持成 198.18 fake-ip 后，节点域名解析失败，延迟和测速全部失败
+35. subscription / core xhttp —— vless URI 的 type=xhttp 被当成 tcp；mihomo < 1.19.22 不认识 xhttp 也不报错，
+                            静默按裸 tcp 发 vless，TCP 延迟正常但 HTTP 全部失败；sing-box 导出退化成 tcp；
+                            vless 链接漏读 encryption / alpn(h3) / allowInsecure
+36. core.find_binary      —— PATH 优先于项目 bin/，系统里过旧的 brew 内核压过 start.sh 下载的新内核
+37. start.sh / start.ps1   —— "$version（" 在 macOS 自带 bash 3.2 + UTF-8 locale 下把全角字符首字节并进变量名，
+                            set -u 报 unbound variable，首次下载内核时脚本直接退出
+38. tester.test_node       —— 服务器 IP 直连不通（被墙/下线）时只报 “HTTP 测试失败”，被误以为协议不支持
+39. subscription._node_key —— 去重键区分域名大小写，YAML 的 tk-X07 与 URI 的 tk-x07 重复成 “#2”
 """
 
 import base64
@@ -49,11 +57,12 @@ import shutil
 import signal
 import socket
 import subprocess
+import sys
 import tempfile
 import threading
 import time
 import unittest
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, urlencode, urlsplit
 
 import run
 from nodescope import core, report, tester, webapp
@@ -1231,7 +1240,7 @@ class TestExitCleanup(unittest.TestCase):
 
 
 class TestFindLocalBinary(unittest.TestCase):
-    """28：PATH 里没有内核时，回退到项目根目录 bin/ 下由 start.sh 下载的 mihomo。"""
+    """28 / 36：start.sh 下载到项目 bin/ 的内核能被找到，且优先于 PATH。"""
 
     def test_fallback_to_project_bin(self):
         orig_dir, orig_which = core.LOCAL_BIN_DIR, core.shutil.which
@@ -1248,6 +1257,32 @@ class TestFindLocalBinary(unittest.TestCase):
                 self.assertEqual(core.find_binary(), path)
             finally:
                 core.LOCAL_BIN_DIR, core.shutil.which = orig_dir, orig_which
+                if orig_env is not None:
+                    os.environ["NS_MIHOMO_BIN"] = orig_env
+
+    def test_project_bin_preferred_over_path(self):
+        """36：bin/ 里是自动保持最新的内核，必须优先于 PATH 里可能过旧的系统内核；NS_MIHOMO_BIN 仍最优先。"""
+        orig_dir, orig_which = core.LOCAL_BIN_DIR, core.shutil.which
+        orig_env = os.environ.pop("NS_MIHOMO_BIN", None)
+        with tempfile.TemporaryDirectory() as d:
+            local = os.path.join(d, "mihomo")
+            env_bin = os.path.join(d, "custom-mihomo")
+            for path in (local, env_bin):
+                with open(path, "w") as f:
+                    f.write("#!/bin/sh\n")
+                os.chmod(path, 0o755)
+            core.LOCAL_BIN_DIR = d
+            core.shutil.which = lambda name: "/usr/local/bin/" + name
+            try:
+                self.assertEqual(core.find_binary(), local)
+                os.environ["NS_MIHOMO_BIN"] = env_bin
+                self.assertEqual(core.find_binary(), env_bin)
+                del os.environ["NS_MIHOMO_BIN"]
+                os.remove(local)
+                self.assertEqual(core.find_binary(), "/usr/local/bin/mihomo", "bin/ 没有内核时退回 PATH")
+            finally:
+                core.LOCAL_BIN_DIR, core.shutil.which = orig_dir, orig_which
+                os.environ.pop("NS_MIHOMO_BIN", None)
                 if orig_env is not None:
                     os.environ["NS_MIHOMO_BIN"] = orig_env
 
@@ -1374,6 +1409,205 @@ class TestClashLongYamlAndUriParsing(unittest.TestCase):
         text = f"# 我的节点\n{self._SS}#香港 01\n- {self._SS}#日本(IPLC)\nurl: \"{self._SS}#美国[x2]\"\n"
         nodes, warns = parse(text)
         self.assertEqual([n["name"] for n in nodes], ["香港 01", "日本(IPLC)", "美国[x2]"], f"警告: {warns}")
+
+
+class TestXhttp(unittest.TestCase):
+    """35：xhttp 传输的解析、导出与旧内核提示。"""
+
+    EXTRA = {
+        "xPaddingBytes": "100-1000",
+        "noGRPCHeader": True,
+        "scMaxEachPostBytes": 1000000.0,
+        "xmux": {"maxConcurrency": "16-32", "hKeepAlivePeriod": 30},
+        "downloadSettings": {
+            "address": "dl.example.com",
+            "port": 443,
+            "security": "tls",
+            "tlsSettings": {"serverName": "dl.example.com", "alpn": ["h2"]},
+            "xhttpSettings": {"path": "/dl", "host": "dl.example.com"},
+        },
+    }
+
+    def _uri(self, **extra_q):
+        q = {"type": "xhttp", "security": "tls", "sni": "a.com", "path": "/xh", "host": "a.com", "mode": "auto"}
+        q.update(extra_q)
+        return f"vless://11111111-1111-1111-1111-111111111111@a.com:443?{urlencode(q)}#XH"
+
+    def test_vless_uri_xhttp_parsed(self):
+        nodes, warns = parse(self._uri(extra=json.dumps(self.EXTRA)))
+        self.assertEqual(len(nodes), 1, warns)
+        n = nodes[0]
+        self.assertEqual(n["network"], "xhttp")
+        opts = n["xhttp-opts"]
+        self.assertEqual((opts["path"], opts["host"], opts["mode"]), ("/xh", "a.com", "auto"))
+        self.assertEqual(opts["x-padding-bytes"], "100-1000")
+        self.assertIs(opts["no-grpc-header"], True)
+        self.assertEqual(opts["sc-max-each-post-bytes"], 1000000)
+        self.assertIsInstance(opts["sc-max-each-post-bytes"], int)
+        self.assertEqual(opts["reuse-settings"], {"max-concurrency": "16-32", "h-keep-alive-period": 30})
+        ds = opts["download-settings"]
+        self.assertEqual(ds["server"], "dl.example.com")
+        self.assertIs(ds["tls"], True)
+        self.assertEqual(ds["servername"], "dl.example.com")
+        self.assertEqual(ds["path"], "/dl")
+
+    def test_splithttp_alias_and_bad_extra(self):
+        nodes, warns = parse(self._uri(type="splithttp", extra="{not json"))
+        self.assertEqual(len(nodes), 1, warns)
+        self.assertEqual(nodes[0]["network"], "xhttp")
+        self.assertEqual(nodes[0]["xhttp-opts"]["path"], "/xh")
+
+    def test_trojan_xhttp_rejected(self):
+        nodes, warns = parse("trojan://pwd@a.com:443?type=xhttp&path=%2Fx#T")
+        self.assertEqual(nodes, [])
+        self.assertTrue(any("xhttp" in w for w in warns), warns)
+
+    def test_uri_roundtrip(self):
+        nodes, _ = parse(self._uri(extra=json.dumps(self.EXTRA)))
+        again, warns = parse(node_to_uri(nodes[0]))
+        self.assertEqual(len(again), 1, warns)
+        self.assertEqual(again[0]["xhttp-opts"], nodes[0]["xhttp-opts"])
+
+    def test_vless_encryption_alpn_insecure(self):
+        enc = "mlkem768x25519plus.native.0rtt.abc"
+        nodes, warns = parse(self._uri(type="xhttp", alpn="h3", encryption=enc, allowInsecure="1"))
+        self.assertEqual(len(nodes), 1, warns)
+        n = nodes[0]
+        self.assertEqual((n["encryption"], n["alpn"], n["skip-cert-verify"]), (enc, ["h3"], True))
+        again, _ = parse(node_to_uri(n))
+        self.assertEqual((again[0]["encryption"], again[0]["alpn"], again[0]["skip-cert-verify"]), (enc, ["h3"], True))
+        # encryption=none 是默认值，不写进配置
+        nodes, _ = parse(self._uri(encryption="none"))
+        self.assertNotIn("encryption", nodes[0])
+        # sing-box 不支持 VLESS Encryption
+        tcp = {"name": "e", "type": "vless", "server": "a.com", "port": 443, "uuid": "u", "encryption": enc}
+        self.assertIsNone(node_to_singbox(tcp))
+
+    def test_singbox_skips_xhttp(self):
+        nodes, _ = parse(self._uri())
+        self.assertIsNone(node_to_singbox(nodes[0]))
+
+    def _runner(self, version):
+        nodes = [
+            {"name": "xh", "type": "vless", "network": "xhttp"},
+            {"name": "plain", "type": "vless"},
+        ]
+        r = core.MihomoRunner(nodes, iface="")
+        r.binary = "/fake/mihomo"
+        core._VERSION_CACHE[r.binary] = version
+        self.addCleanup(core._VERSION_CACHE.pop, r.binary, None)
+        return r
+
+    def test_old_kernel_rejects_xhttp_with_hint(self):
+        r = self._runner((1, 19, 20))
+        r._reject_unsupported_transports()
+        self.assertEqual([p["name"] for p in r.proxies], ["plain"])
+        self.assertIn("1.19.20", r.rejected["xh"])
+        self.assertIn("1.19.22", r.rejected["xh"])
+
+    def test_new_or_unknown_kernel_keeps_xhttp(self):
+        for version in ((1, 19, 22), None):
+            r = self._runner(version)
+            r._reject_unsupported_transports()
+            self.assertEqual(len(r.proxies), 2)
+            self.assertEqual(r.rejected, {})
+
+    def test_kernel_version_parsing(self):
+        script_dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, script_dir)
+        cases = {
+            "Mihomo Meta v1.19.31 darwin arm64 with go1.25.7 2026-02-07": (1, 19, 31),
+            "Mihomo Meta 1.19.20 darwin arm64 with go1.25.7": (1, 19, 20),
+            "Mihomo Meta alpha-ab12cd3 linux amd64 with go1.25.7": None,  # 不能把 go 版本当内核版本
+        }
+        for i, (out, want) in enumerate(cases.items()):
+            path = os.path.join(script_dir, f"m{i}.py")
+            with open(path, "w") as f:
+                f.write(f"import sys; print({out!r})\n")
+            binary = path
+            core._VERSION_CACHE.pop(binary, None)
+            orig = core.subprocess.run
+
+            # 用 python 解释器跑脚本，兼容 Windows（无法直接执行 .py）
+            def fake_run(cmd, _p=path, **kw):
+                return orig([sys.executable, _p] + cmd[1:], **kw)
+
+            core.subprocess.run = fake_run
+            try:
+                self.assertEqual(core.kernel_version(binary), want, out)
+            finally:
+                core.subprocess.run = orig
+                core._VERSION_CACHE.pop(binary, None)
+
+
+class TestStartScriptVarBoundary(unittest.TestCase):
+    """37：启动脚本里紧跟非 ASCII 字符的变量必须写成 ${var}。"""
+
+    ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+    def test_no_bare_var_before_non_ascii(self):
+        pat = re.compile(r"\$[A-Za-z_][A-Za-z0-9_]*(?=[^\x00-\x7f])")
+        for name in ("start.sh", "start.ps1"):
+            with open(os.path.join(self.ROOT, name), encoding="utf-8-sig") as f:
+                bad = [
+                    f"{name}:{i}: {line.strip()}"
+                    for i, line in enumerate(f, 1)
+                    if not line.lstrip().startswith("#") and pat.search(line)
+                ]
+            self.assertEqual(bad, [], "变量后紧跟中文/全角字符时要写成 ${var}")
+
+    @unittest.skipUnless(os.path.exists("/bin/sh"), "需要 /bin/sh")
+    def test_bash_utf8_locale_expansion(self):
+        # 直接验证 start.sh 里的写法在 UTF-8 locale 下能正确展开
+        env = dict(os.environ, LC_ALL="en_US.UTF-8", LANG="en_US.UTF-8")
+        out = subprocess.run(
+            ["/bin/sh", "-c", 'set -u; version=v1; arch=arm64; echo "${version}（x/${arch}）"'],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env, check=False,
+        )
+        self.assertEqual(out.stdout.decode("utf-8", "replace").strip(), "v1（x/arm64）")
+
+
+class TestUnreachableServerHint(unittest.TestCase):
+    """38：TCP 直连不通时，错误要指明是服务器连不上；UDP / H3 节点不适用这条判断。"""
+
+    def _run(self, node):
+        class Runner:
+            ports = {node["name"]: 1}
+            rejected = {}
+
+        def boom(*a, **kw):
+            raise OSError("Remote end closed connection")
+
+        orig = tester.tcp_ping, tester.http_latency
+        tester.tcp_ping = lambda *a, **kw: [None, None, None]
+        tester.http_latency = boom
+        try:
+            return tester.test_node(node, runner=Runner(), options={"timeout": 1})
+        finally:
+            tester.tcp_ping, tester.http_latency = orig
+
+    def test_tcp_node_unreachable(self):
+        r = self._run({"name": "a", "type": "vless", "server": "h.com", "port": 443, "network": "xhttp"})
+        self.assertTrue(r["error"].startswith("服务器连不上:"), r["error"])
+        self.assertIn("h.com:443", r["error"])
+
+    def test_udp_and_h3_nodes_keep_generic_error(self):
+        for node in (
+            {"name": "b", "type": "hysteria2", "server": "h.com", "port": 443},
+            {"name": "c", "type": "vless", "server": "h.com", "port": 443, "alpn": ["h3"]},
+        ):
+            self.assertTrue(self._run(node)["error"].startswith("HTTP 测试失败:"), node)
+
+
+class TestNodeKeyCaseInsensitive(unittest.TestCase):
+    """39：域名大小写不同的同一节点应当去重。"""
+
+    def test_server_case(self):
+        from nodescope.subscription import _node_key
+
+        a = {"name": "X", "type": "vless", "server": "tk-X07.example.com", "port": 1}
+        b = dict(a, server="tk-x07.example.com")
+        self.assertEqual(_node_key(a), _node_key(b))
 
 
 if __name__ == "__main__":
