@@ -868,16 +868,19 @@ def test_node(node, runner=None, options=None):
 
         # 测活：请求 204 页面，失败即判定不可用（带一次抖动重试）
         timeout = opts.get("timeout", 5)
-        try:
-            result["http_ms"] = round(http_latency(port, timeout=timeout), 1)
-            result["ok"] = True
-        except Exception:
-            # 网络抖动单次快速重试，避免好节点因瞬时丢包被误杀
+        # TCP 类协议本机直连都不通时，经节点也是从本机连同一个服务器，重试只会再白等一轮超时
+        # （死节点从约 15 秒降到约 10 秒）；只有直连通而 HTTP 失败，才可能是瞬时抖动
+        unreachable = result["tcp_ms"] is None and _tcp_transport(node)
+        attempts = 1 if unreachable else 2
+        for attempt in range(attempts):
             try:
                 result["http_ms"] = round(http_latency(port, timeout=timeout), 1)
                 result["ok"] = True
-            except Exception as e:  # noqa: BLE001
-                if result["tcp_ms"] is None and _tcp_transport(node):
+                break
+            except Exception as e:  # noqa: BLE001 - 网络抖动单次快速重试，避免好节点因瞬时丢包被误杀
+                if attempt < attempts - 1:
+                    continue
+                if unreachable:
                     # TCP 直连都不通，问题在服务器可达性而不是协议/配置，单独说明，
                     # 免得用户以为是 nodescope 不支持该协议
                     result["error"] = (
@@ -989,6 +992,18 @@ def _getaddrinfo_timeout(host, timeout):
     return box.get("result")
 
 
+def _remember_source(source_by_cc, cc, hint, url):
+    """记录该地区可用的测速源（调用方持锁）。
+
+    hint 失效后另选出了新源时要替换掉它，否则同地区后续每个节点都会先在失效的源上
+    白跑一轮（最坏约 13 秒）。缓存已被别的测速线程换成其他源时不覆盖。
+    """
+    if not cc or not url:
+        return
+    if source_by_cc.get(cc) in (None, hint):
+        source_by_cc[cc] = url
+
+
 def test_all(nodes, runner=None, options=None, concurrency=8,
              progress_cb=None, speed_concurrency=1, cancel_event=None,
              status_cb=None, on_speed_start=None, on_speed_tick=None):
@@ -1000,8 +1015,11 @@ def test_all(nodes, runner=None, options=None, concurrency=8,
     """
     import queue
     options = dict(options or {})
-    if cancel_event is not None:
-        options["cancel_event"] = cancel_event
+    # 调用方（如 CLI）不传 cancel_event 时也要有一个：Ctrl+C 打断主线程后要靠它
+    # 让线程池丢弃排队任务，否则 shutdown(wait=True) 会把剩余节点全部测完才退出
+    if cancel_event is None:
+        cancel_event = threading.Event()
+    options["cancel_event"] = cancel_event
     if options.get("iface") is None:
         if runner is not None and getattr(runner, "iface", None):
             options["iface"] = runner.iface
@@ -1075,9 +1093,8 @@ def test_all(nodes, runner=None, options=None, concurrency=8,
                     try:
                         mbps, url = _run_speed(port, options, live_cb=_live_cb, hint=hint)
                         res["speed_mbps"] = mbps
-                        if cc and url:
-                            with results_lock:
-                                source_by_cc.setdefault(cc, url)
+                        with results_lock:
+                            _remember_source(source_by_cc, cc, hint, url)
                     except Exception as e:  # noqa: BLE001 - 测速失败只影响速度列
                         res["error"] = f"测速失败: {e}"
                     res["_speed_tested"] = True
@@ -1122,6 +1139,11 @@ def test_all(nodes, runner=None, options=None, concurrency=8,
                 for pending_f in futures:
                     pending_f.cancel()
                 break
+    except BaseException:
+        # Ctrl+C（KeyboardInterrupt）等打断主线程时：必须在下面的 finally 之前置位取消，
+        # 线程池才会丢弃排队任务（否则要把剩余节点全部测完），测速线程也会收手
+        cancel_event.set()
+        raise
     finally:
         # 取消时不等待仍在跑的任务，否则「停止」要等最坏 timeout 才返回
         _shutdown_pool(pool, cancel=_cancelled(cancel_event))
@@ -1130,7 +1152,11 @@ def test_all(nodes, runner=None, options=None, concurrency=8,
     if want_speed:
         for _ in range(speed_workers_count):
             speed_q.put(None)
-        for t in speed_threads:
-            t.join()
+        try:
+            for t in speed_threads:
+                t.join()
+        except BaseException:
+            cancel_event.set()  # 等待测速期间被 Ctrl+C：让测速线程尽快停下
+            raise
 
     return [results[n["name"]] for n in nodes if n["name"] in results]

@@ -46,6 +46,17 @@
                             set -u 报 unbound variable，首次下载内核时脚本直接退出
 38. tester.test_node       —— 服务器 IP 直连不通（被墙/下线）时只报 “HTTP 测试失败”，被误以为协议不支持
 39. subscription._node_key —— 去重键区分域名大小写，YAML 的 tk-X07 与 URI 的 tk-x07 重复成 “#2”
+40. tester.test_all CLI 中断 —— CLI 不传 cancel_event，Ctrl+C 后 shutdown(wait=True) 要把排队节点全部测完才退出
+41. subscription.load_text —— text/plain 不带 charset 时 requests 按 ISO-8859-1 解码，明文订阅中文节点名乱码
+42. subscription URI 解析   —— hy2 多端口 host:443,2000-3000 整条解析失败；type=httpupgrade 静默当成 tcp；
+                            ss v2ray-plugin 被拒；vmess TCP+HTTP 伪装 / alpn / fp / allowInsecure 漏读；导出不对称
+43. static/index.html 进度  —— 测速失败的节点不计入「测速 x/y」，进度永远到不了 100%；中途改选项会切换进度模式
+44. tester.test_node 死节点 —— TCP 直连已超时仍重试一次 HTTP，每个死节点白等约 15 秒
+45. tester 选源缓存失效    —— setdefault 不替换失效的源，同地区后续节点都先在坏源上白跑一轮
+46. subscription 补拉 UA   —— as_completed 的 10 秒超时被 with 退出时的 shutdown(wait=True) 抵消
+47. report HTML 图标       —— 报告图标仍走 jsdelivr CDN，离线/国内打开全部裂图
+48. iface 缓存并发 / UDP 53 —— 并发线程同时查同一域名各发一遍 DNS；UDP 53 被屏蔽时每个新域名都先等两轮超时
+49. static/index.html 导出 —— 「导出可用节点」按原始顺序，而 CLI 按速度排名
 """
 
 import base64
@@ -353,7 +364,8 @@ class TestExportFixes(unittest.TestCase):
     def test_ss_unknown_plugin_still_rejected(self):
         from nodescope.subscription import parse_uri
 
-        uri = "ss://YWVzLTEyOC1nY206cHc=@a.com:8388?plugin=v2ray-plugin%3Btls#X"
+        # v2ray-plugin 已支持（见 42），这里用 mihomo 不支持的 kcptun
+        uri = "ss://YWVzLTEyOC1nY206cHc=@a.com:8388?plugin=kcptun%3Bmode%3Dfast#X"
         with self.assertRaises(Exception):
             parse_uri(uri)
 
@@ -1608,6 +1620,354 @@ class TestNodeKeyCaseInsensitive(unittest.TestCase):
         a = {"name": "X", "type": "vless", "server": "tk-X07.example.com", "port": 1}
         b = dict(a, server="tk-x07.example.com")
         self.assertEqual(_node_key(a), _node_key(b))
+
+
+class TestCliInterruptCancelsQueue(unittest.TestCase):
+    """40：CLI 不传 cancel_event，Ctrl+C 打断主线程后仍要把排队节点全部测完才退出。"""
+
+    def test_keyboard_interrupt_drops_queued_nodes(self):
+        calls = []
+
+        def slow(node, runner=None, options=None):
+            calls.append(node["name"])
+            threading.Event().wait(0.2)
+            return {"name": node["name"], "ok": False, "error": "x", "_speed_tested": True}
+
+        real_as_completed = tester.as_completed
+
+        def interrupted(futures):
+            # 第一个节点完成后模拟用户按下 Ctrl+C（主线程收到 KeyboardInterrupt）
+            for f in real_as_completed(futures):
+                yield f
+                raise KeyboardInterrupt
+
+        nodes = [{"name": f"n{i}"} for i in range(40)]
+        orig = tester.test_node, tester.as_completed
+        tester.test_node, tester.as_completed = slow, interrupted
+        try:
+            t0 = time.monotonic()
+            with self.assertRaises(KeyboardInterrupt):
+                tester.test_all(nodes, runner=None, options={"speed": False, "iface": "x"},
+                                concurrency=4)
+            elapsed = time.monotonic() - t0
+        finally:
+            tester.test_node, tester.as_completed = orig
+        # 修复前要跑完 40 个（约 2s）；修复后只剩已在跑的几个
+        self.assertLess(elapsed, 1.0)
+        time.sleep(0.3)  # 等在跑的线程收尾，确认排队任务确实被丢弃
+        self.assertLessEqual(len(calls), 8, calls)
+
+
+class TestSubscriptionBodyDecoding(unittest.TestCase):
+    """41：text/plain 不带 charset 时 resp.text 按 ISO-8859-1 解码，中文节点名乱码。"""
+
+    def _resp(self, body, ctype):
+        import requests
+        from requests.utils import get_encoding_from_headers
+
+        r = requests.models.Response()
+        r._content = body
+        r.status_code = 200
+        r.headers["Content-Type"] = ctype
+        r.encoding = get_encoding_from_headers(r.headers)  # 与 requests 适配器的行为一致
+        return r
+
+    def test_plain_text_without_charset(self):
+        from nodescope.subscription import _decode_body
+
+        body = "proxies:\n  - {name: 香港01, type: ss}\n".encode()
+        self.assertIn("香港01", _decode_body(self._resp(body, "text/plain")))
+        self.assertIn("香港01", _decode_body(self._resp(b"\xef\xbb\xbf" + body, "text/yaml")))
+
+    def test_non_utf8_falls_back(self):
+        from nodescope.subscription import _decode_body
+
+        body = "名字".encode("gbk")
+        self.assertEqual(_decode_body(self._resp(body, "text/plain; charset=gbk")), "名字")
+
+
+class TestUriParsingCoverage(unittest.TestCase):
+    """42：URI 解析覆盖不全，好节点被误报不可用；导出与解析不对称。"""
+
+    def test_hy2_port_hopping_in_host(self):
+        from nodescope.subscription import parse_uri
+
+        n = parse_uri("hysteria2://pw@example.com:443,20000-30000/?sni=a&alpn=h3#hy")
+        self.assertEqual((n["server"], n["port"], n["ports"]), ("example.com", 443, "443,20000-30000"))
+        self.assertEqual(n["alpn"], ["h3"])
+        n6 = parse_uri("hy2://pw@[2001:db8::1]:8443,9000-9100#v6")
+        self.assertEqual((n6["server"], n6["port"], n6["ports"]), ("2001:db8::1", 8443, "8443,9000-9100"))
+        with self.assertRaises(ValueError):
+            parse_uri("hysteria2://pw@example.com:abc#bad")
+        # 导出再读回，端口跳跃不能丢
+        back = parse_uri(node_to_uri(n))
+        self.assertEqual((back["port"], back["ports"], back["alpn"]), (443, "443,20000-30000", ["h3"]))
+
+    def test_httpupgrade(self):
+        from nodescope.subscription import parse_uri
+
+        for uri in ("vless://u@h.com:443?type=httpupgrade&path=%2Fup&host=cdn.com&security=tls#a",
+                    "trojan://pw@h.com:443?type=httpupgrade&path=%2Fup&host=cdn.com#b"):
+            n = parse_uri(uri)
+            self.assertEqual(n["network"], "ws", uri)
+            self.assertEqual(n["ws-opts"], {"path": "/up", "headers": {"Host": "cdn.com"},
+                                            "v2ray-http-upgrade": True})
+            q = parse_qs(urlsplit(node_to_uri(n)).query)
+            self.assertEqual(q["type"], ["httpupgrade"])
+            self.assertEqual(node_to_singbox(n)["transport"],
+                             {"type": "httpupgrade", "path": "/up", "host": "cdn.com"})
+        vm = {"v": "2", "ps": "vm", "add": "h.com", "port": "80", "id": "id", "net": "httpupgrade",
+              "path": "/up", "host": "cdn.com"}
+        n = parse_uri("vmess://" + base64.b64encode(json.dumps(vm).encode()).decode())
+        self.assertTrue(n["ws-opts"]["v2ray-http-upgrade"])
+        self.assertEqual(parse_uri(node_to_uri(n))["ws-opts"], n["ws-opts"])
+
+    def test_ss_v2ray_plugin(self):
+        from nodescope.subscription import parse_uri
+
+        cred = base64.b64encode(b"aes-256-gcm:pw").decode()
+        n = parse_uri(f"ss://{cred}@1.2.3.4:443/?plugin=v2ray-plugin%3Btls%3Bhost%3Dcdn.com%3Bpath%3D%2Fws#v2")
+        self.assertEqual(n["plugin"], "v2ray-plugin")
+        self.assertEqual(n["plugin-opts"], {"mode": "websocket", "tls": True, "host": "cdn.com", "path": "/ws"})
+        back = parse_uri(node_to_uri(n))
+        self.assertEqual((back["plugin"], back["plugin-opts"]), (n["plugin"], n["plugin-opts"]))
+        sb = node_to_singbox(n)
+        self.assertEqual(sb["plugin"], "v2ray-plugin")
+        self.assertIn("tls", sb["plugin_opts"].split(";"))
+        self.assertNotIn("tls=True", sb["plugin_opts"])
+        with self.assertRaises(Exception):
+            parse_uri(f"ss://{cred}@1.2.3.4:443/?plugin=v2ray-plugin%3Bmode%3Dquic#q")
+
+    def test_vmess_tcp_http_and_tls_fields(self):
+        from nodescope.subscription import parse_uri
+
+        vm = {"v": "2", "ps": "vm", "add": "h.com", "port": "80", "id": "id", "net": "tcp",
+              "type": "http", "path": "/a,/b", "host": "x.com", "tls": "tls", "sni": "s.com",
+              "alpn": "h2,http/1.1", "fp": "chrome", "allowInsecure": "1"}
+        n = parse_uri("vmess://" + base64.b64encode(json.dumps(vm).encode()).decode())
+        self.assertEqual(n["network"], "http")
+        self.assertEqual(n["http-opts"], {"path": ["/a", "/b"], "headers": {"Host": ["x.com"]}})
+        self.assertEqual((n["alpn"], n["client-fingerprint"], n["skip-cert-verify"]),
+                         (["h2", "http/1.1"], "chrome", True))
+        back = parse_uri(node_to_uri(n))
+        for key in ("network", "http-opts", "alpn", "client-fingerprint", "skip-cert-verify", "servername"):
+            self.assertEqual(back.get(key), n.get(key), key)
+        # sing-box 不支持 TCP HTTP 伪装：跳过而不是导出成 HTTP/2
+        self.assertIsNone(node_to_singbox(n))
+
+    def test_vless_tcp_header_http_roundtrip(self):
+        from nodescope.subscription import parse_uri
+
+        n = parse_uri("vless://u@h.com:80?type=tcp&headerType=http&path=%2Fp&host=x.com#t")
+        self.assertEqual(n["network"], "http")
+        self.assertEqual(n["http-opts"], {"path": ["/p"], "headers": {"Host": ["x.com"]}})
+        q = parse_qs(urlsplit(node_to_uri(n)).query)
+        self.assertEqual((q["type"], q["headerType"]), (["tcp"], ["http"]))
+        self.assertEqual(parse_uri(node_to_uri(n))["http-opts"], n["http-opts"])
+
+
+class TestWebProgressCountsFailedSpeed(unittest.TestCase):
+    """43：前端以 speed_mbps 判断测速完成，测速失败的节点永远不计入，进度到不了 100%。"""
+
+    def _fn(self):
+        with open(TestExportPngMasksSubscription.HTML, encoding="utf-8") as f:
+            src = f.read()
+        return src[src.index("function setProgress"):src.index("function updateStats")]
+
+    def test_uses_test_mode_snapshot(self):
+        self.assertNotIn("$('noSpeed').checked", self._fn(), "进度模式必须用开测时记下的 testNoSpeed")
+
+    @unittest.skipUnless(shutil.which("node"), "需要 node 才能执行前端脚本")
+    def test_failed_speed_counts_as_done(self):
+        script = (
+            "const els = {}; const $ = id => els[id] || (els[id] = {style: {}, textContent: ''});\n"
+            "let testNoSpeed = false;\n"
+            "const rows = {a: {_done: true, ok: true, speed_mbps: 50, _speed_tested: true},\n"
+            "              b: {_done: true, ok: true, speed_mbps: null, _speed_tested: true},\n"
+            "              c: {_done: true, ok: false}};\n"
+            "const order = ['a', 'b', 'c'];\n"
+            + self._fn() +
+            "\nsetProgress(3, 3, 2); process.stdout.write(els.barFill.style.width + '|' + els.progressText.textContent);"
+        )
+        out = subprocess.run(["node", "-e", script], capture_output=True, text=True, timeout=10, check=True).stdout
+        width, text = out.split("|")
+        self.assertEqual(width, "100%")
+        self.assertEqual(text, "测速全部完成")
+
+
+class TestDeadNodeSkipsRetry(unittest.TestCase):
+    """44：TCP 直连已超时的 TCP 类节点不再重试 HTTP，UDP 类节点仍保留一次抖动重试。"""
+
+    def _calls(self, node, tcp):
+        calls = []
+
+        class Runner:
+            ports = {node["name"]: 1}
+            rejected = {}
+
+        def boom(*a, **kw):
+            calls.append(1)
+            raise OSError("timeout")
+
+        orig = tester.tcp_ping, tester.http_latency
+        tester.tcp_ping = lambda *a, **kw: tcp
+        tester.http_latency = boom
+        try:
+            r = tester.test_node(node, runner=Runner(), options={"timeout": 1})
+        finally:
+            tester.tcp_ping, tester.http_latency = orig
+        return len(calls), r
+
+    def test_unreachable_tcp_node_tries_once(self):
+        n, r = self._calls({"name": "a", "type": "vless", "server": "h", "port": 1}, [None, None, None])
+        self.assertEqual(n, 1)
+        self.assertTrue(r["error"].startswith("服务器连不上:"))
+
+    def test_reachable_or_udp_node_retries(self):
+        n, _ = self._calls({"name": "a", "type": "vless", "server": "h", "port": 1}, [10.0, 12.0, 11.0])
+        self.assertEqual(n, 2)
+        n, _ = self._calls({"name": "b", "type": "hysteria2", "server": "h", "port": 1}, [None, None, None])
+        self.assertEqual(n, 2)
+
+
+class TestSpeedSourceReplaced(unittest.TestCase):
+    """45：hint 失效后选出的新源要替换缓存；别的线程已换过的不覆盖。"""
+
+    def test_remember_source(self):
+        cache = {}
+        tester._remember_source(cache, "JP", None, "A")
+        self.assertEqual(cache, {"JP": "A"})
+        tester._remember_source(cache, "JP", "A", "B")  # A 失效，选出 B
+        self.assertEqual(cache["JP"], "B")
+        tester._remember_source(cache, "JP", "A", "C")  # 另一个线程拿着旧 hint A，不能覆盖 B
+        self.assertEqual(cache["JP"], "B")
+        tester._remember_source(cache, "JP", None, "D")  # 无 hint 时不覆盖已有
+        self.assertEqual(cache["JP"], "B")
+        tester._remember_source(cache, None, None, "E")
+        tester._remember_source(cache, "US", "X", None)
+        self.assertEqual(cache, {"JP": "B"})
+
+
+class TestFallbackUaTimeout(unittest.TestCase):
+    """46：补拉其他 UA 卡住时，load_nodes 必须按超时返回主订阅结果。"""
+
+    def test_slow_fallback_does_not_block(self):
+        from nodescope import subscription as sub
+
+        main = "ss://" + base64.b64encode(b"aes-256-gcm:pw@1.2.3.4:8388").decode() + "#main"
+
+        def fake_load_text(src, timeout=20, retries=3, ua=None, allow_file=True):
+            if ua:  # 其他 UA 的补拉：模拟服务器迟迟不回
+                threading.Event().wait(1.5)
+            return main, ""
+
+        orig = sub.load_text, sub.FALLBACK_UA_TIMEOUT
+        sub.load_text, sub.FALLBACK_UA_TIMEOUT = fake_load_text, 0.2
+        try:
+            t0 = time.monotonic()
+            nodes, _warns, _ = sub.load_nodes("https://sub.example.com/x")
+            elapsed = time.monotonic() - t0
+        finally:
+            sub.load_text, sub.FALLBACK_UA_TIMEOUT = orig
+        self.assertEqual([n["name"] for n in nodes], ["main"])
+        self.assertLess(elapsed, 1.0)
+
+
+class TestHtmlReportIconsInline(unittest.TestCase):
+    """47：HTML 报告的解锁图标内联为 data URI，不再引用 CDN。"""
+
+    def test_icons_inlined(self):
+        res = [{"name": "a", "type": "ss", "ok": True, "speed_mbps": 10.0, "http_ms": 100.0,
+                "unlock": {"chatgpt": True, "netflix": True}}]
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "r.html")
+            report.export_html(res, path, show_unlock=True)
+            with open(path, encoding="utf-8") as f:
+                html = f.read()
+        self.assertNotIn("jsdelivr", html)
+        self.assertEqual(html.count('src="data:image/svg+xml;base64,'), 2)
+        for _key, (_name, file_name) in report.HTML_UNLOCK_ICONS.items():
+            self.assertTrue(os.path.isfile(os.path.join(report.ICON_DIR, file_name)), file_name)
+
+
+class TestIfaceSingleFlight(unittest.TestCase):
+    """48：同一域名并发只解析一次；UDP 53 不可达后后续域名直接走系统解析。"""
+
+    def setUp(self):
+        from nodescope import iface as iface_mod
+        self.m = iface_mod
+        self.m.clear_cache()
+        self._orig = (self.m._dns_query, self.m.socket.getaddrinfo)
+
+    def tearDown(self):
+        self.m._dns_query, self.m.socket.getaddrinfo = self._orig
+        self.m.clear_cache()
+
+    def _concurrent(self, fn, n=8):
+        out = []
+        threads = [threading.Thread(target=lambda: out.append(fn())) for _ in range(n)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(5)
+        return out
+
+    def test_concurrent_lookups_share_one_query(self):
+        calls = []
+
+        def fake_query(host, iface, server, qtype=1, timeout=3):
+            calls.append(host)
+            threading.Event().wait(0.2)
+            return ["93.184.216.34"]
+
+        self.m._dns_query = fake_query
+        out = self._concurrent(lambda: self.m.resolve_host("same.example", "en0"))
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(out, [[(socket.AF_INET, "93.184.216.34")]] * 8)
+
+    def test_concurrent_failures_shared_not_replayed(self):
+        calls = []
+
+        def fake_query(host, iface, server, qtype=1, timeout=3):
+            calls.append(host)
+            threading.Event().wait(0.2)
+            return []
+
+        self.m._dns_query = fake_query
+        self.m.socket.getaddrinfo = lambda *a, **kw: []
+        t0 = time.monotonic()
+        self._concurrent(lambda: self.m.resolve_host("bad.example", "en0"))
+        self.assertLess(time.monotonic() - t0, 1.5, "失败结果被串行重放")
+        n = len(calls)
+        self.m.resolve_host("bad.example", "en0")
+        self.assertEqual(len(calls), 2 * n, "失败仍不应被缓存")
+
+    def test_udp_dns_down_remembered(self):
+        calls = []
+
+        def fake_query(host, iface, server, qtype=1, timeout=3):
+            calls.append((host, server))
+            raise socket.timeout()
+
+        self.m._dns_query = fake_query
+        self.m.socket.getaddrinfo = lambda *a, **kw: [(socket.AF_INET, 1, 6, "", ("1.2.3.4", 0))]
+        self.assertEqual(self.m.resolve_host("a.example", "en0"), [(socket.AF_INET, "1.2.3.4")])
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(self.m.resolve_host("b.example", "en0"), [(socket.AF_INET, "1.2.3.4")])
+        self.assertEqual(len(calls), 2, "UDP 53 已判定不可达，不应再发 UDP 查询")
+        # 另一块网卡不受影响
+        self.m.resolve_host("c.example", "en1")
+        self.assertEqual(len(calls), 4)
+
+
+class TestWebExportOrderedByRank(unittest.TestCase):
+    """49：Web「导出可用节点」要按排名导出，与 CLI 一致。"""
+
+    def test_export_sorted(self):
+        with open(TestExportPngMasksSubscription.HTML, encoding="utf-8") as f:
+            src = f.read()
+        body = src[src.index("function exportNodes"):src.index("function ellipsize")]
+        self.assertRegex(body, r"availableRaw = [^;]*\.sort\([^;]*rankVal\(", "导出必须按 rankVal 排序")
 
 
 if __name__ == "__main__":

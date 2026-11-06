@@ -1,6 +1,9 @@
 """结果输出：终端表格 + JSON 导出。"""
 
+import base64
+import functools
 import json
+import os
 
 from rich.console import Console
 from rich.table import Table
@@ -187,8 +190,6 @@ def export_nodes_yaml(results, original_nodes, path, top=None):
 
 def export_nodes_base64(results, original_nodes, path, top=None):
     """导出可用节点为标准 Base64 订阅文本（兼容各大代理客户端）。"""
-    import base64
-
     from .subscription import node_to_uri
 
     ranked = sort_results([r for r in results if r.get("ok")])
@@ -272,7 +273,9 @@ def _ms_badge(v, green, yellow):
     return _badge(cls, f"{v:.0f} ms")
 
 
-ICON_CDN = "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/svg/"
+# 与 Web 界面共用 static/icons；报告内联成 data URI，离线或国内打开也能显示，
+# 不依赖 jsdelivr，也不向第三方暴露测速行为
+ICON_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static", "icons")
 HTML_UNLOCK_ICONS = {
     "chatgpt": ("OpenAI (ChatGPT)", "openai.svg"),
     "claude": ("Claude (Anthropic)", "claude-ai.svg"),
@@ -285,14 +288,28 @@ HTML_UNLOCK_ICONS = {
 }
 
 
+@functools.lru_cache(maxsize=None)
+def _icon_data_uri(file_name):
+    """读取本地图标转成 data URI；文件缺失返回 None（该平台退回文字）。"""
+    try:
+        with open(os.path.join(ICON_DIR, file_name), "rb") as f:
+            data = f.read()
+    except OSError:
+        return None
+    return "data:image/svg+xml;base64," + base64.b64encode(data).decode("ascii")
+
+
 def _unlock_badges_html(u):
     if not isinstance(u, dict):
         return '<span class="dim">-</span>'
     icons = []
     for k, (name, file_name) in HTML_UNLOCK_ICONS.items():
         if u.get(k):
-            src = f"{ICON_CDN}{file_name}"
-            icons.append(f'<span class="icon-badge" data-tip="{name}"><img src="{src}" width="18" height="18" alt="{name}" style="display:block;border-radius:3px;"></span>')
+            src = _icon_data_uri(file_name)
+            if src:
+                icons.append(f'<span class="icon-badge" data-tip="{name}"><img src="{src}" width="18" height="18" alt="{name}" style="display:block;border-radius:3px;"></span>')
+            else:
+                icons.append(f'<span class="badge plain">{name}</span>')
     return f'<div style="display:inline-flex;gap:5px;vertical-align:middle;">{"".join(icons)}</div>' if icons else '<span class="dim">-</span>'
 
 

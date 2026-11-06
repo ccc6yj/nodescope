@@ -752,10 +752,12 @@ function errBrief(err) {
 }
 
 function setProgress(done_, total, ok) {
-  const isNoSpeed = $('noSpeed').checked;
+  // 用开测时记下的模式：测试中途改动复选框不能影响本场进度
+  const isNoSpeed = testNoSpeed;
   const probeDone = order.filter(n => rows[n]._done).length;
   const okTotal = order.filter(n => rows[n].ok).length;
-  const speedDone = order.filter(n => rows[n].ok && rows[n].speed_mbps != null).length;
+  // 以后端的 _speed_tested 为准：测速失败（speed_mbps 为空）的节点也算测完，否则进度永远到不了 100%
+  const speedDone = order.filter(n => rows[n].ok && (rows[n]._speed_tested || rows[n].speed_mbps != null)).length;
 
   if (isNoSpeed) {
     const pct = total ? (probeDone / total) * 100 : 0;
@@ -1208,7 +1210,9 @@ function exportNodes() {
     chip('没有可用节点可导出', 'warn');
     return;
   }
-  const availableRaw = rawNodes.filter(n => okNames.has(n.name));
+  // 按排名导出（速度降序，没测速的按延迟），与 CLI 的 --export-nodes 一致，客户端里最快的排最前
+  const availableRaw = rawNodes.filter(n => okNames.has(n.name))
+    .sort((a, b) => rankVal(rows[b.name]) - rankVal(rows[a.name]));
   if (!availableRaw.length) {
     chip('没有找到原始节点配置', 'warn');
     return;

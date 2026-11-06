@@ -34,6 +34,8 @@ FALLBACK_UAS = (
     "ClashforWindows/0.20.39",
     "clash.meta/v1.19.0",
 )
+# 补拉其他 UA 的总等待上限（秒）：只是锦上添花，不能拖慢主订阅
+FALLBACK_UA_TIMEOUT = 10
 
 SUPPORTED_SCHEMES = ("ss", "vmess", "vless", "trojan", "hysteria2", "hy2", "anytls", "tuic", "tuic5")
 
@@ -47,6 +49,20 @@ def _b64decode(text):
     text = re.sub(r"\s+", "", str(text)).lstrip("\ufeff").replace("-", "+").replace("_", "/")
     pad = "=" * (-len(text) % 4)
     return base64.b64decode(text + pad)
+
+
+def _decode_body(resp):
+    """订阅响应体按 UTF-8 解码，失败才退回 requests 的猜测。
+
+    不能直接用 resp.text：Content-Type 为 text/plain、text/yaml 且不带 charset 时，
+    requests 按 RFC 2616 默认 ISO-8859-1，明文 YAML / URI 里的中文节点名全变乱码；
+    application/octet-stream 则会对整个响应体跑编码探测，大订阅明显变慢。
+    """
+    raw = resp.content or b""
+    try:
+        return raw.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        return resp.text
 
 
 def load_text(src, timeout=20, retries=3, ua=None, allow_file=True):
@@ -64,7 +80,7 @@ def load_text(src, timeout=20, retries=3, ua=None, allow_file=True):
                 resp = requests.get(src_str, timeout=timeout, headers=headers)
                 resp.raise_for_status()
                 userinfo = resp.headers.get("subscription-userinfo", "") or ""
-                return resp.text, userinfo
+                return _decode_body(resp), userinfo
             except requests.RequestException as e:
                 last_err = e
                 if attempt < retries - 1:
@@ -186,17 +202,21 @@ def load_nodes(src, timeout=15, on_status=None, allow_file=True):
     if on_status:
         on_status("合并其他客户端节点…")
     extras = []
-    with ThreadPoolExecutor(max_workers=len(FALLBACK_UAS)) as pool:
+    # 不能用 with：退出时 shutdown(wait=True) 会等慢请求跑完，as_completed 的超时形同虚设。
+    # 超时后直接返回，还在跑的请求留在后台自行结束（自身有 requests 超时兜底）
+    pool = ThreadPoolExecutor(max_workers=len(FALLBACK_UAS))
+    try:
         futs = [pool.submit(fetch_ua, ua) for ua in FALLBACK_UAS]
         try:
-            for fut in as_completed(futs, timeout=10):
+            for fut in as_completed(futs, timeout=FALLBACK_UA_TIMEOUT):
                 try:
                     extras.append(fut.result())
-                except Exception:
+                except Exception:  # noqa: BLE001 - 补拉失败不影响主订阅
                     continue
         except FuturesTimeout:
-            for fut in futs:
-                fut.cancel()
+            pass
+    finally:
+        pool.shutdown(wait=False)
 
     seen = {_node_key(n) for n in nodes}
     added = 0
@@ -606,7 +626,7 @@ def _parse_ss(uri):
 
 
 def _apply_ss_plugin(proxy, spec):
-    """解析 SIP003 plugin 参数并写入 proxy（目前支持 simple-obfs / obfs-local）。"""
+    """解析 SIP003 plugin 参数并写入 proxy（支持 simple-obfs / obfs-local、v2ray-plugin）。"""
     parts = [p for p in str(spec).split(";") if p]
     if not parts:
         return
@@ -616,6 +636,23 @@ def _apply_ss_plugin(proxy, spec):
         k, _, v = item.partition("=")
         if k.strip():
             kv[k.strip().lower()] = v
+    if plugin == "v2ray-plugin":
+        # mihomo 内置 v2ray-plugin（仅 websocket 模式）；SIP003 里 tls 是不带值的开关
+        mode = kv.get("mode") or "websocket"
+        if mode != "websocket":
+            raise UnsupportedNode(f"v2ray-plugin 仅支持 websocket 模式: {spec[:30]}")
+        opts = {"mode": "websocket"}
+        if "tls" in kv and kv["tls"].lower() not in ("false", "0"):
+            opts["tls"] = True
+        if kv.get("host"):
+            opts["host"] = kv["host"]
+        if kv.get("path"):
+            opts["path"] = kv["path"]
+        if kv.get("mux") and kv["mux"] not in ("0", "false"):
+            opts["mux"] = True
+        proxy["plugin"] = "v2ray-plugin"
+        proxy["plugin-opts"] = opts
+        return proxy
     if plugin not in ("obfs", "simple-obfs", "obfs-local"):
         raise UnsupportedNode(f"暂不支持 ss plugin: {spec[:30]}")
     mode = kv.get("obfs") or kv.get("mode")
@@ -652,12 +689,21 @@ def _parse_vmess(uri):
         "udp": True,
     }
     net = (data.get("net") or "tcp").lower()
-    if net == "ws":
+    if net in ("ws", "httpupgrade"):
         proxy["network"] = "ws"
         ws_opts = {"path": data.get("path") or "/"}
         if data.get("host"):
             ws_opts["headers"] = {"Host": data["host"]}
+        if net == "httpupgrade":
+            ws_opts["v2ray-http-upgrade"] = True
         proxy["ws-opts"] = ws_opts
+    elif net == "tcp" and str(data.get("type") or "").lower() == "http":
+        # TCP + HTTP 头伪装（老机场常见）；漏掉的话服务端收不到伪装头，直接断开
+        proxy["network"] = "http"
+        http_opts = {"path": [p for p in str(data.get("path") or "/").split(",") if p] or ["/"]}
+        if data.get("host"):
+            http_opts["headers"] = {"Host": [h for h in str(data["host"]).split(",") if h]}
+        proxy["http-opts"] = http_opts
     elif net == "grpc":
         proxy["network"] = "grpc"
         proxy["grpc-opts"] = {"grpc-service-name": data.get("path") or ""}
@@ -673,18 +719,34 @@ def _parse_vmess(uri):
     if str(data.get("tls") or "").lower() in ("tls", "true", "1"):
         proxy["tls"] = True
         proxy["servername"] = data.get("sni") or data.get("host") or host
+        if data.get("alpn"):
+            proxy["alpn"] = [a.strip() for a in str(data["alpn"]).split(",") if a.strip()]
+        if data.get("fp"):
+            proxy["client-fingerprint"] = data["fp"]
+        if str(data.get("allowInsecure") or data.get("insecure") or "").lower() in ("1", "true"):
+            proxy["skip-cert-verify"] = True
     return proxy
 
 
 def _apply_uri_transport(proxy, q):
     """把 URI query 里的传输层配置写入 proxy（vless/trojan 共用）。"""
     net = q.get("type", "tcp").lower()
-    if net == "ws":
+    if net in ("ws", "httpupgrade"):
         proxy["network"] = "ws"
         ws_opts = {"path": unquote(q.get("path", "/"))}
         if q.get("host"):
             ws_opts["headers"] = {"Host": q["host"]}
+        if net == "httpupgrade":
+            # mihomo 把 HTTPUpgrade 实现为 ws 的一个开关；不认的话会被静默当成裸 tcp，必然连不上
+            ws_opts["v2ray-http-upgrade"] = True
         proxy["ws-opts"] = ws_opts
+    elif net == "tcp" and q.get("headerType", "").lower() == "http":
+        # TCP + HTTP 头伪装：mihomo 写作 network: http
+        proxy["network"] = "http"
+        http_opts = {"path": [p for p in unquote(q.get("path", "/")).split(",") if p] or ["/"]}
+        if q.get("host"):
+            http_opts["headers"] = {"Host": [h for h in q["host"].split(",") if h]}
+        proxy["http-opts"] = http_opts
     elif net == "grpc":
         proxy["network"] = "grpc"
         proxy["grpc-opts"] = {"grpc-service-name": unquote(q.get("serviceName", ""))}
@@ -936,11 +998,34 @@ def _parse_trojan(uri):
     return proxy
 
 
+_PORT_SPEC_RE = re.compile(r"\d+(?:-\d+)?(?:,\d+(?:-\d+)?)*")
+
+
+def _uri_port(u, default):
+    """返回 (port, 端口跳跃段或 None)。
+
+    Hysteria2 规范允许 host:443,20000-30000 这种多端口写法，此时 urlsplit 的 .port
+    会抛 ValueError，整条节点解析失败。取第一个端口作 port，整段作为 mihomo 的 ports。
+    """
+    try:
+        return (u.port or default), None
+    except ValueError:
+        # IPv6 地址带方括号，最后一个冒号之后就是端口段
+        spec = u.netloc.rpartition("@")[2].rpartition(":")[2]
+        if not _PORT_SPEC_RE.fullmatch(spec):
+            raise ValueError(f"无法解析端口: {spec[:30]}") from None
+        port = int(re.match(r"\d+", spec).group())
+        if not 0 < port < 65536:
+            raise ValueError(f"端口超出范围: {port}") from None
+        return port, spec
+
+
 def _parse_hysteria2(uri):
     u = urlsplit(uri)
     if not u.hostname:
         raise ValueError("hysteria2 节点缺少地址")
-    host, port = u.hostname, u.port or 443
+    port, port_spec = _uri_port(u, 443)
+    host = u.hostname
     q = {k: v[-1] for k, v in parse_qs(u.query).items()}
 
     proxy = {
@@ -959,8 +1044,11 @@ def _parse_hysteria2(uri):
         proxy["obfs"] = q["obfs"]
         if q.get("obfs-password"):
             proxy["obfs-password"] = q["obfs-password"]
-    if q.get("mport"):
-        proxy["ports"] = q["mport"]
+    if q.get("mport") or port_spec:
+        proxy["ports"] = q.get("mport") or port_spec
+    # node_to_uri 会导出 alpn，这里必须能读回来
+    if q.get("alpn"):
+        proxy["alpn"] = [x.strip() for x in q["alpn"].split(",") if x.strip()]
     return proxy
 
 
@@ -1051,15 +1139,29 @@ def _uri_transport_params(params, node):
     if net == "ws":
         ws_opts = node.get("ws-opts")
         if isinstance(ws_opts, dict):
+            if ws_opts.get("v2ray-http-upgrade"):
+                params["type"] = "httpupgrade"
             params["path"] = ws_opts.get("path") or "/"
             headers = ws_opts.get("headers")
             if isinstance(headers, dict) and headers.get("Host"):
                 params["host"] = headers["Host"]
+    elif net == "http":
+        # mihomo 的 network: http 是 TCP + HTTP 头伪装；链接里的 type=http 却表示 HTTP/2，不能原样写
+        params["type"], params["headerType"] = "tcp", "http"
+        http_opts = node.get("http-opts")
+        if isinstance(http_opts, dict):
+            paths = http_opts.get("path")
+            if isinstance(paths, list) and paths:
+                params["path"] = ",".join(str(p) for p in paths)
+            headers = http_opts.get("headers")
+            hosts = headers.get("Host") if isinstance(headers, dict) else None
+            if isinstance(hosts, list) and hosts:
+                params["host"] = ",".join(str(h) for h in hosts)
     elif net == "grpc":
         gopts = node.get("grpc-opts")
         if isinstance(gopts, dict) and gopts.get("grpc-service-name"):
             params["serviceName"] = gopts["grpc-service-name"]
-    elif net in ("h2", "http"):
+    elif net == "h2":
         h2 = node.get("h2-opts")
         if isinstance(h2, dict):
             if h2.get("path"):
@@ -1080,6 +1182,37 @@ def _uri_transport_params(params, node):
                 params["extra"] = json.dumps(extra, ensure_ascii=False, separators=(",", ":"))
 
 
+def _ss_plugin_opts_sip003(node):
+    """ss 插件参数转 SIP003 风格（不含插件名），如 obfs=tls;obfs-host=x 或 tls;host=x;path=/p。"""
+    plugin = node.get("plugin")
+    opts = node.get("plugin-opts") if isinstance(node.get("plugin-opts"), dict) else {}
+    parts = []
+    if plugin == "v2ray-plugin":
+        if opts.get("mode"):
+            parts.append(f"mode={opts['mode']}")
+        if opts.get("tls"):
+            parts.append("tls")  # SIP003 里是不带值的开关，写成 tls=True 插件不认
+        for key in ("host", "path"):
+            if opts.get(key):
+                parts.append(f"{key}={opts[key]}")
+        if opts.get("mux"):
+            parts.append("mux=1")
+    elif plugin == "obfs":
+        if opts.get("mode"):
+            parts.append(f"obfs={opts['mode']}")
+        if opts.get("host"):
+            parts.append(f"obfs-host={opts['host']}")
+    else:
+        parts = [f"{k}={v}" for k, v in opts.items()]
+    return ";".join(parts)
+
+
+def _ss_plugin_sip003(node):
+    """ss 分享链接里的 plugin 参数：插件名;参数。"""
+    opts = _ss_plugin_opts_sip003(node)
+    return f"{node.get('plugin')};{opts}" if opts else str(node.get("plugin"))
+
+
 def node_to_uri(node):
     """将内部节点配置字典反向转换为通用代理 URI 字符串。"""
     t = (node.get("type") or "").lower()
@@ -1098,13 +1231,7 @@ def node_to_uri(node):
         # QX obfs / ss plugin 不导出会丢失混淆参数，连不上服务端
         plugin = node.get("plugin")
         if plugin:
-            plugin_opts = node.get("plugin-opts") if isinstance(node.get("plugin-opts"), dict) else {}
-            parts = [plugin]
-            if plugin_opts.get("mode"):
-                parts.append(f"obfs={plugin_opts['mode']}")
-            if plugin_opts.get("host"):
-                parts.append(f"obfs-host={plugin_opts['host']}")
-            params["plugin"] = ";".join(parts)
+            params["plugin"] = _ss_plugin_sip003(node)
         q = ("?" + urlencode(params)) if params else ""
         return f"ss://{cred}@{server_host}:{port}{q}#{tag}"
 
@@ -1125,11 +1252,33 @@ def node_to_uri(node):
             v2["sni"] = node["servername"]
         ws_opts = node.get("ws-opts")
         if ws_opts and isinstance(ws_opts, dict):
+            if ws_opts.get("v2ray-http-upgrade"):
+                v2["net"] = "httpupgrade"
             if ws_opts.get("path"):
                 v2["path"] = ws_opts["path"]
             headers = ws_opts.get("headers")
             if headers and isinstance(headers, dict) and headers.get("Host"):
                 v2["host"] = headers["Host"]
+        http_opts = node.get("http-opts")
+        if v2["net"] == "http" and isinstance(http_opts, dict):
+            # mihomo 的 network: http 是 TCP + HTTP 头伪装；分享链接里写作 net=tcp、type=http
+            # （net=http 在 v2rayN 里表示 HTTP/2，原样导出会变成另一种传输）
+            v2["net"], v2["type"] = "tcp", "http"
+            paths = http_opts.get("path")
+            if isinstance(paths, list) and paths:
+                v2["path"] = ",".join(str(p) for p in paths)
+            hosts = (http_opts.get("headers") or {}).get("Host") if isinstance(http_opts.get("headers"), dict) else None
+            if isinstance(hosts, list) and hosts:
+                v2["host"] = ",".join(str(h) for h in hosts)
+        grpc_opts = node.get("grpc-opts")
+        if isinstance(grpc_opts, dict) and grpc_opts.get("grpc-service-name"):
+            v2["path"] = grpc_opts["grpc-service-name"]
+        if node.get("alpn"):
+            v2["alpn"] = ",".join(node["alpn"]) if isinstance(node["alpn"], list) else str(node["alpn"])
+        if node.get("client-fingerprint"):
+            v2["fp"] = node["client-fingerprint"]
+        if node.get("skip-cert-verify"):
+            v2["allowInsecure"] = "1"
         raw = json.dumps(v2, ensure_ascii=False)
         return "vmess://" + base64.b64encode(raw.encode()).decode()
 
@@ -1240,6 +1389,12 @@ def _singbox_transport(node):
             headers = ws_opts.get("headers")
             if isinstance(headers, dict) and headers.get("Host"):
                 ws_cfg["headers"] = {"Host": headers["Host"]}
+            if ws_opts.get("v2ray-http-upgrade"):
+                # sing-box 的 HTTPUpgrade 是独立传输类型，Host 写在 host 字段
+                ws_cfg["type"] = "httpupgrade"
+                host = ws_cfg.pop("headers", {}).get("Host")
+                if host:
+                    ws_cfg["host"] = host
         return ws_cfg
     if net == "grpc":
         grpc_cfg = {"type": "grpc"}
@@ -1247,7 +1402,7 @@ def _singbox_transport(node):
         if isinstance(gopts, dict) and gopts.get("grpc-service-name"):
             grpc_cfg["service_name"] = gopts["grpc-service-name"]
         return grpc_cfg
-    if net in ("h2", "http"):
+    if net == "h2":
         h2_cfg = {"type": "http"}
         h2 = node.get("h2-opts")
         if isinstance(h2, dict):
@@ -1268,8 +1423,9 @@ def node_to_singbox(node):
     name = node.get("name") or "node"
     server = node.get("server") or ""
     port = int(node.get("port") or 443)
-    # sing-box 没有 xhttp 传输，照常导出会退化成裸 tcp 连不上，交给调用方计入“跳过”
-    if (node.get("network") or "").lower() == "xhttp":
+    # sing-box 没有 xhttp 传输，也不支持 TCP + HTTP 头伪装（mihomo 的 network: http），
+    # 照常导出会退化成裸 tcp 或变成 HTTP/2 传输，连不上，交给调用方计入“跳过”
+    if (node.get("network") or "").lower() in ("xhttp", "http"):
         return None
 
     outbound = {
@@ -1284,22 +1440,12 @@ def node_to_singbox(node):
         outbound["password"] = node.get("password", "")
         plugin = node.get("plugin")
         if plugin:
-            plugin_opts = node.get("plugin-opts") if isinstance(node.get("plugin-opts"), dict) else {}
-            # sing-box 内置的是 obfs-local，且参数键名是 SIP003 风格（obfs=/obfs-host=），
-            # 不是 mihomo 的 mode=/host=，写错会导致插件解析失败。
-            if plugin == "obfs":
-                outbound["plugin"] = "obfs-local"
-                parts = []
-                if plugin_opts.get("mode"):
-                    parts.append(f"obfs={plugin_opts['mode']}")
-                if plugin_opts.get("host"):
-                    parts.append(f"obfs-host={plugin_opts['host']}")
-                if parts:
-                    outbound["plugin_opts"] = ";".join(parts)
-            else:
-                outbound["plugin"] = plugin
-                if plugin_opts:
-                    outbound["plugin_opts"] = ";".join(f"{k}={v}" for k, v in plugin_opts.items())
+            # sing-box 内置的是 obfs-local / v2ray-plugin，参数是 SIP003 风格（obfs=/obfs-host=、
+            # tls 开关），不是 mihomo 的 mode=/host=/tls: true，写错会导致插件解析失败。
+            outbound["plugin"] = "obfs-local" if plugin == "obfs" else plugin
+            opts = _ss_plugin_opts_sip003(node)
+            if opts:
+                outbound["plugin_opts"] = opts
         return outbound
 
     if t == "vmess":

@@ -35,17 +35,47 @@ _cache = {}
 _cache_lock = threading.Lock()
 
 
+_key_locks = {}
+_last = {}  # key -> (算完时刻, 值)：最近一次计算结果，供并发等待者复用
+# UDP 53 不可达（被屏蔽）的标记有效期：期间直接走系统解析，不再每个域名先等两轮超时
+_UDP_DNS_DOWN_TTL = 120
+
+
+def _fresh(key, ttl):
+    """返回 (命中, 值)；调用方持 _cache_lock。"""
+    hit = _cache.get(key)
+    if hit and time.monotonic() - hit[0] < ttl:
+        return True, hit[1]
+    return False, None
+
+
 def _cached(key, ttl, compute, keep=None):
-    """带 TTL 的简单缓存；keep(value) 为假时不缓存（如 DNS 解析失败，下次重试）。"""
-    now = time.monotonic()
+    """带 TTL 的简单缓存；keep(value) 为假时不缓存（如 DNS 解析失败，下次重试）。
+
+    同一 key 同时只计算一次：开测瞬间多个探活线程会同时查同一个服务器域名、
+    同时探测网卡，没有这把锁就会发出成倍的 DNS 查询、起成倍的子进程。
+    排队等锁的线程直接复用这次的结果（即使是不缓存的失败结果），
+    否则 8 个线程会把一次失败的 DNS 超时串行重放 8 遍。
+    """
+    arrived = time.monotonic()
     with _cache_lock:
-        hit = _cache.get(key)
-        if hit and now - hit[0] < ttl:
-            return hit[1]
-    value = compute()
-    if keep is None or keep(value):
+        ok, value = _fresh(key, ttl)
+        if ok:
+            return value
+        key_lock = _key_locks.setdefault(key, threading.Lock())
+    with key_lock:
         with _cache_lock:
-            _cache[key] = (time.monotonic(), value)
+            ok, value = _fresh(key, ttl)
+            last = _last.get(key)
+        if ok:
+            return value
+        if last and last[0] >= arrived:  # 等锁期间别的线程刚算完
+            return last[1]
+        value = compute()
+        with _cache_lock:
+            _last[key] = (time.monotonic(), value)
+            if keep is None or keep(value):
+                _cache[key] = (time.monotonic(), value)
     return value
 
 
@@ -53,6 +83,8 @@ def clear_cache():
     """清空网卡与 DNS 缓存（测试用）。"""
     with _cache_lock:
         _cache.clear()
+        _key_locks.clear()
+        _last.clear()
 
 
 def detect_physical_iface():
@@ -133,10 +165,17 @@ def resolve_host(host, iface=None):
     return list(_cached(("dns", host, iface), _DNS_TTL, lambda: _resolve_uncached(host, iface), keep=bool))
 
 
+def _udp_dns_down(iface):
+    with _cache_lock:
+        return _fresh(("udp-dns-down", iface), _UDP_DNS_DOWN_TTL)[0]
+
+
 def _resolve_uncached(host, iface):
     found = []
-    if iface:
-        for server in ("1.1.1.1", "8.8.8.8"):
+    if iface and not _udp_dns_down(iface):
+        servers = ("1.1.1.1", "8.8.8.8")
+        timed_out = set()
+        for server in servers:
             for qtype, fam in ((1, socket.AF_INET), (28, socket.AF_INET6)):
                 try:
                     for ip in _dns_query(host, iface, server, qtype=qtype, timeout=_DNS_TIMEOUT):
@@ -146,6 +185,7 @@ def _resolve_uncached(host, iface):
                         found.append((fam, ip))
                 except socket.timeout:
                     # 该 DNS 不可达（如 UDP 53 被屏蔽），不必再等它的 AAAA 超时
+                    timed_out.add(server)
                     break
                 except ValueError:
                     # 非法域名（idna 编码失败 / 标签超长）：自建查询做不了，交给系统解析兜底
@@ -156,6 +196,11 @@ def _resolve_uncached(host, iface):
                     break  # 有 A 记录就够，不必再等 AAAA 超时
             if found:
                 break
+        if len(timed_out) == len(servers):
+            # 两个公共 DNS 都超时：多半是网络屏蔽了 UDP 53。记下来，之后的域名直接走系统解析，
+            # 否则每个不同的服务器域名都要先白等 2 × _DNS_TIMEOUT 秒
+            with _cache_lock:
+                _cache[("udp-dns-down", iface)] = (time.monotonic(), True)
     if not found:
         try:
             for info in socket.getaddrinfo(host, None):
