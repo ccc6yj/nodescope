@@ -251,7 +251,10 @@
   tr.pending td { color: var(--ink-3); }
   tr.node-failed td { color: var(--ink-3); }
   tr.node-failed td.name { color: var(--ink-2); text-decoration: line-through; text-decoration-color: var(--rule); }
-  tr.testing-node td { background: var(--accent-soft); }
+  /* 测速中的行会被移到表格顶部：垫一层不透明底色并抬高层级，滑过其他行时不和它们的文字叠在一起
+     （sticky 表头的 z-index 是 2，仍盖在它上面） */
+  tr.testing-node { position: relative; z-index: 1; }
+  tr.testing-node td { background: linear-gradient(var(--accent-soft), var(--accent-soft)), var(--bg); }
   tr.testing-node td:first-child { box-shadow: inset 3px 0 0 var(--accent); }
 
   .num { font-variant-numeric: tabular-nums; }
@@ -867,6 +870,49 @@ function updateRow(name, r) {
   }
 }
 
+/* ---------- 行移动动画（FLIP） ---------- */
+// 先记下各行位置，再执行 DOM 移动，然后让每行从旧位置平滑滑到新位置。
+// 动画进行中再次移动时，getBoundingClientRect 拿到的是当前视觉位置，衔接不会跳。
+const reduceMotion = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+const FLIP_MS = 450;
+
+function flipMove(mutate) {
+  const tbody = $('tbody');
+  if (reduceMotion) { mutate(); return; }
+  const trs = [...tbody.rows].filter(tr => tr.style.display !== 'none');
+  const before = new Map(trs.map(tr => [tr, tr.getBoundingClientRect().top]));
+  mutate();
+  // 只给移动前后至少有一端在可视区里的行做动画，长列表里看不见的行直接就位
+  const panel = tbody.closest('.table-panel').getBoundingClientRect();
+  const visible = y => y > panel.top - 80 && y < panel.bottom + 80;
+  const moved = [];
+  for (const tr of trs) {
+    const from = before.get(tr);
+    const to = tr.getBoundingClientRect().top;
+    const dy = from - to;
+    if (Math.abs(dy) < 1 || !(visible(from) || visible(to))) continue;
+    tr.style.transition = 'none';
+    tr.style.transform = `translateY(${dy}px)`;
+    moved.push(tr);
+  }
+  if (!moved.length) return;
+  tbody.offsetHeight;  // 强制回流，让上面的起始位置先生效，下面的过渡才会播放
+  for (const tr of moved) {
+    tr.style.transition = `transform ${FLIP_MS}ms cubic-bezier(.2, .8, .2, 1)`;
+    tr.style.transform = '';
+    clearTimeout(tr._flipTimer);
+    tr._flipTimer = setTimeout(() => { tr.style.transition = ''; }, FLIP_MS + 50);
+  }
+}
+
+// 开始测速的节点挪到表格最上方，方便盯着看实时速度。
+// 用户手动点了列排序时尊重其排序，不挪动
+function pinTestingRow(tr) {
+  const tbody = $('tbody');
+  if (sortState.key || tbody.firstElementChild === tr) return;
+  flipMove(() => tbody.insertBefore(tr, tbody.firstElementChild));
+}
+
 /* ---------- 排序 ---------- */
 let sortState = { key: null, asc: true };
 
@@ -940,7 +986,7 @@ function handleSortClick(k) {
     sortState.asc = !(k === 'speed' || k === 'status' || k === 'unlock');
   }
   updateSortIndicators();
-  applySort();
+  flipMove(applySort);
 }
 
 // 使用事件委托，避免 start() 重置 thead 时监听器丢失
@@ -951,13 +997,14 @@ $('tbl').querySelector('thead').addEventListener('click', e => {
 });
 
 function refreshRanks() {
-  if (sortState.key) { applySort(); return; }
+  if (sortState.key) { flipMove(applySort); return; }
   const sorted = order.slice().sort((a, b) => rankVal(rows[b]) - rankVal(rows[a]));
   const tbody = $('tbody');
-  sorted.forEach((name, i) => {
+  // 测完统一排名时，各行也滑到最终位置，而不是瞬间重排
+  flipMove(() => sorted.forEach((name, i) => {
     tbody.appendChild(rows[name]._tr);
     rows[name]._tr.querySelector('.rank').textContent = i + 1;
-  });
+  }));
 }
 function rankVal(r) {
   if (r.speed_mbps != null) return r.speed_mbps;
@@ -1278,6 +1325,7 @@ function setupEventSource(stream) {
       row._tr.classList.add('testing-node');
       const stCell = row._tr.cells[row._tr.cells.length - 1];
       if (stCell) stCell.innerHTML = '<span class="st st-run"><span class="spin"></span>测速中</span>';
+      pinTestingRow(row._tr);
       $('progressText').textContent = `正在测速：${d.name}`;
     }
   });
