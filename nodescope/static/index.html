@@ -425,7 +425,7 @@
             <label><input type="radio" name="speedSeconds" value="8"><span>8 秒</span></label>
           </div>
         </div>
-        <div class="opt" title="按实际传输时间计速；上限低只是提前停止，不会把速度算低">
+        <div class="opt" title="到量即停。按实际传输时间计速并剔除起步爬坡段；但上限太低时快节点还没跑满就停了，速度仍会偏低">
           <span>单节点流量</span>
           <div class="seg" role="radiogroup" aria-label="单节点流量上限">
             <label><input type="radio" name="maxMb" value=""><span>不限</span></label>
@@ -452,6 +452,7 @@
         </div>
       </div>
       <label class="check"><input type="checkbox" id="noSpeed"> 只测延迟</label>
+      <label class="check" title="解锁检测要经节点打开各平台页面，每个可用节点约耗 0.5 MB 流量；节点多或流量紧张时可关掉"><input type="checkbox" id="noUnlock"> 不测解锁</label>
     </div>
 
     <div class="intro">
@@ -622,12 +623,16 @@ function esc(s) {
     c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 }
 // 本机带宽基线：优先用直连实测值；没测到时，若 ≥3 个节点速度都落在最快值
-// 的 3% 以内，则推断它们撞了本机带宽上限（而非节点真的一样快）
+// 的 3% 以内，则推断它们撞了本机带宽上限（而非节点真的一样快）。
+// 直连实测值只在没有节点明显超过它时才可信：直连国际线路常被限速（如测出 20 Mbps），
+// 走专线的节点却能跑 200 Mbps，这时基线反映的是直连线路而不是本机带宽，
+// 拿它当上限会把所有节点都标成「≈ 本机带宽上限」。
+const BASELINE_TRUST = 1.15;
 function effBaseline() {
-  if (localBW) return localBW;
   const sp = order.map(n => rows[n])
     .filter(r => r._done && r.speed_mbps != null)
     .map(r => r.speed_mbps).sort((a, b) => b - a);
+  if (localBW && !(sp.length && sp[0] > localBW * BASELINE_TRUST)) return localBW;
   if (sp.length >= 3 && sp.filter(v => v >= sp[0] * 0.97).length >= 3) return sp[0];
   return null;
 }
@@ -1285,7 +1290,7 @@ function start() {
     concurrency: val('concurrency'),
     speed_conc: val('speedConc'),
     nospeed: $('noSpeed').checked ? '1' : '0',
-    unlock: '1',  // 流媒体 / AI 解锁始终检测
+    unlock: $('noUnlock').checked ? '0' : '1',  // 流媒体 / AI 解锁默认检测
   };
 
   const ctrl = new AbortController();
@@ -1382,7 +1387,7 @@ function setupEventSource(stream) {
 
   stream.addEventListener('localbw', e => {
     localBW = JSON.parse(e.data).mbps;
-    chip(`本机带宽 ${localBW.toFixed(1)} Mbps（直连测得；节点速度接近它说明撞到了本机上限）`);
+    chip(`本机带宽 ${localBW.toFixed(1)} Mbps（直连测得；节点速度接近它说明撞到了本机上限，节点明显更快则说明直连线路受限、该值不作参考）`);
   });
 
   stream.addEventListener('result', e => {
@@ -1494,6 +1499,7 @@ function optsSummary() {
     if (val('speedConc') !== '1') parts.push(`同时 ${val('speedConc')} 个`);
   }
   parts.push(`并发 ${val('concurrency')}`);
+  if ($('noUnlock').checked) parts.push('不测解锁');
   return parts.join(' · ');
 }
 

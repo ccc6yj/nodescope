@@ -57,6 +57,10 @@
 47. report HTML 图标       —— 报告图标仍走 jsdelivr CDN，离线/国内打开全部裂图
 48. iface 缓存并发 / UDP 53 —— 并发线程同时查同一域名各发一遍 DNS；UDP 53 被屏蔽时每个新域名都先等两轮超时
 49. static/index.html 导出 —— 「导出可用节点」按原始顺序，而 CLI 按速度排名
+50. static/index.html 带宽基线 —— 直连基线偏低（直连国际线路受限）时，所有节点都被标成「≈ 本机带宽上限」
+51. tester 解锁流量        —— Netflix / TikTok 整页下载，每个节点多耗数百 KB 订阅流量；Web 端无法关闭解锁检测
+52. tester._download_one 爬坡段 —— 慢启动计入平均速率，流量上限提前停时快节点被系统性低估
+53. start.sh / start.ps1   —— 下载的内核不校验 SHA256，经第三方加速站时等于直接执行对方给的二进制
 """
 
 import base64
@@ -632,9 +636,11 @@ class TestDownloadTiming(unittest.TestCase):
         finally:
             tester.requests.get = orig
         self.assertGreater(got, 0)
-        # 旧实现按墙钟算，会得到 ≈ handshake + window
+        # 旧实现按墙钟算，会得到 ≈ handshake + window；
+        # 现在还会剔除起步爬坡段（见用例 52），计速时长约为 window × (1 - 爬坡占比)
+        steady = window * (1 - tester._RAMP_FRACTION)
         self.assertLess(elapsed, window + 0.15)
-        self.assertGreaterEqual(elapsed, window - 0.05)
+        self.assertGreaterEqual(elapsed, steady - 0.1)
         self.assertGreater(wall, handshake + window - 0.05, "测速窗口应从首字节开始计")
 
 
@@ -919,7 +925,8 @@ class TestDownloadRefetch(unittest.TestCase):
         finally:
             tester.requests.get = orig
         self.assertGreaterEqual(len(calls), 3, "文件拉完后应重新请求")
-        self.assertGreaterEqual(elapsed, 0.45)
+        # 计速时长已剔除起步爬坡段（见用例 52），所以略短于 0.5s 的窗口
+        self.assertGreaterEqual(elapsed, 0.5 * (1 - tester._RAMP_FRACTION) - 0.1)
         self.assertGreater(got, 5 * 1024 * 2)
 
 
@@ -1146,6 +1153,9 @@ class TestUnlockChecks(unittest.TestCase):
 
             def json(self):
                 return {}
+
+            def iter_content(self, chunk_size):
+                yield self.text.encode()
 
         def fake_get(url, **kwargs):
             if "tiktok" in url:
@@ -1968,6 +1978,171 @@ class TestWebExportOrderedByRank(unittest.TestCase):
             src = f.read()
         body = src[src.index("function exportNodes"):src.index("function ellipsize")]
         self.assertRegex(body, r"availableRaw = [^;]*\.sort\([^;]*rankVal\(", "导出必须按 rankVal 排序")
+
+
+class TestBaselineTrust(unittest.TestCase):
+    """50：直连基线明显低于节点速度时不可信，不能再拿它把节点标成「≈ 本机带宽上限」。"""
+
+    HTML = os.path.join(os.path.dirname(webapp.__file__), "static", "index.html")
+
+    def _eff(self, local_bw, speeds):
+        with open(self.HTML, encoding="utf-8") as f:
+            src = f.read()
+        fn = src[src.index("const BASELINE_TRUST"):src.index("// 提示收进状态栏")]
+        rows = {f"n{i}": {"_done": True, "speed_mbps": v} for i, v in enumerate(speeds)}
+        script = (f"const order = {json.dumps(list(rows))}; const rows = {json.dumps(rows)};"
+                  f"const localBW = {json.dumps(local_bw)};\n{fn}\n"
+                  "process.stdout.write(JSON.stringify(effBaseline()));")
+        out = subprocess.run(["node", "-e", script], capture_output=True, text=True, timeout=10, check=True).stdout
+        return json.loads(out)
+
+    @unittest.skipUnless(shutil.which("node"), "需要 node 才能执行前端脚本")
+    def test_baseline_discarded_when_nodes_far_exceed_it(self):
+        # 直连只有 20 Mbps，专线节点跑到 200：基线作废，且节点速度各不相同时不推断上限
+        self.assertIsNone(self._eff(20, [200, 150, 90]))
+        # 节点都在基线附近：基线可信
+        self.assertEqual(self._eff(100, [98, 95, 60]), 100)
+        self.assertEqual(self._eff(100, [110, 95]), 100, "略高于基线属于测量误差，不应作废")
+        # 基线作废后，≥3 个节点挤在最快值附近时仍按原规则推断撞了上限
+        self.assertEqual(self._eff(20, [200, 198, 197, 50]), 200)
+        self.assertEqual(self._eff(None, [200, 198, 197]), 200)
+
+
+def _chunked_resp(chunks, served):
+    """按块吐正文的假响应；served 记录实际被读走了多少块。"""
+    class _Resp:
+        status_code = 200
+
+        def __init__(self, url):
+            self.url, self.text = url, ""
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def json(self):
+            return {}
+
+        def iter_content(self, chunk_size):
+            for chunk in chunks:
+                served.append(len(chunk))
+                yield chunk
+
+    return _Resp
+
+
+class TestUnlockTraffic(unittest.TestCase):
+    """51：解锁检测走的是订阅流量，能提前下结论的页面不应整页下载。"""
+
+    def _run(self, host, chunks):
+        served, streamed = [], {}
+        resp_cls = _chunked_resp(chunks, served)
+        empty_cls = _chunked_resp([], [])
+
+        def fake_get(url, **kwargs):
+            if host in url:
+                streamed["stream"] = kwargs.get("stream")
+                return resp_cls(url)
+            return empty_cls(url)
+
+        orig = tester.requests.get
+        tester.requests.get = fake_get
+        try:
+            res = tester.check_unlocks(1, country_code="JP")
+        finally:
+            tester.requests.get = orig
+        self.assertTrue(streamed.get("stream"), "必须流式请求，否则 requests 会先把整页读完")
+        return res, served
+
+    def test_tiktok_stops_at_first_region(self):
+        filler = b"x" * 16384
+        res, served = self._run("tiktok", [filler, b'..."region":"JP"...'] + [filler] * 40)
+        self.assertTrue(res["tiktok"])
+        self.assertLessEqual(len(served), 3, "读到 region 就应停止")
+        # region 跨块时也要能识别
+        res, _ = self._run("tiktok", [b'..."regi', b'on":"JP"...'])
+        self.assertTrue(res["tiktok"])
+        res, _ = self._run("tiktok", [filler, b'"region":"CN"'])
+        self.assertFalse(res["tiktok"])
+
+    def test_netflix_reads_only_head(self):
+        filler = b"x" * 16384
+        res, served = self._run("netflix", [filler] * 150)  # 约 2.4MB 的正常剧集页
+        self.assertTrue(res["netflix"])
+        self.assertLessEqual(sum(served), tester._NETFLIX_HEAD_BYTES + 16384)
+        res, _ = self._run("netflix", [b"<html><title>Netflix</title>", b"<h1>Oh no!</h1></html>"])
+        self.assertFalse(res["netflix"], "错误页仍要识别出来")
+
+    def test_web_can_disable_unlock(self):
+        with open(TestBaselineTrust.HTML, encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn('id="noUnlock"', src)
+        self.assertRegex(src, r"unlock: \$\('noUnlock'\)\.checked \? '0' : '1'")
+
+
+class TestSteadyWindow(unittest.TestCase):
+    """52：计速要剔除起步爬坡段，否则流量上限提前停时快节点被系统性低估。"""
+
+    @staticmethod
+    def _marks(segments, step=0.05):
+        """segments: [(持续秒数, 字节/秒), ...] → 每 step 秒一个 (时刻, 累计字节) 采样点。"""
+        marks, t, done = [], 0.0, 0.0
+        for seconds, rate in segments:
+            for _ in range(int(round(seconds / step))):
+                t += step
+                done += rate * step
+                marks.append((round(t, 6), done))
+        return marks, t, done
+
+    def test_ramp_excluded(self):
+        # 第 1 秒爬坡只有 1MB/s，之后稳定在 10MB/s
+        marks, t_end, total = self._marks([(1.0, 1e6), (4.0, 10e6)])
+        got, elapsed = tester._steady_window(marks, 0.0, t_end, total)
+        self.assertAlmostEqual(got / elapsed, 10e6, delta=0.3e6)
+        self.assertLess(total / t_end, 8.5e6, "按整段平均会被爬坡段拉低")
+
+    def test_short_run_skips_proportionally(self):
+        # 流量上限让测速 0.8s 就停：只剔除前 30%，剩余时长仍够计速
+        marks, t_end, total = self._marks([(0.25, 2e6), (0.55, 30e6)])
+        got, elapsed = tester._steady_window(marks, 0.0, t_end, total)
+        self.assertGreater(got / elapsed, total / t_end * 1.2)
+        self.assertGreaterEqual(elapsed, tester._MIN_STEADY_SECONDS)
+
+    def test_falls_back_to_whole_window(self):
+        # 只有开头 0.3s 有数据，之后断流到 5s：不能拿片段算，耗时要含断流的等待
+        marks, _, total = self._marks([(0.3, 10e6)])
+        self.assertEqual(tester._steady_window(marks, 0.0, 5.0, total), (total, 5.0))
+        # 整段太短：剔除后不足最小计速时长，按整段算且时长有下限
+        marks, t_end, total = self._marks([(0.2, 10e6)])
+        got, elapsed = tester._steady_window(marks, 0.0, t_end, total)
+        self.assertEqual(got, total)
+        self.assertGreaterEqual(elapsed, tester._MIN_STEADY_SECONDS)
+
+
+class TestKernelDownloadChecksum(unittest.TestCase):
+    """53：启动脚本下载内核后必须先校验 SHA256 再解压、运行；校验值不能经加速前缀获取。"""
+
+    ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+    def _read(self, name):
+        with open(os.path.join(self.ROOT, name), encoding="utf-8-sig") as f:
+            return f.read()
+
+    def test_start_sh_verifies_before_extract(self):
+        src = self._read("start.sh")
+        body = src[src.index("download_mihomo() {"):]
+        self.assertLess(body.index("expected_sha256 \"$version\""), body.index("gunzip -c"))
+        api_line = next(ln for ln in src.splitlines() if "api.github.com/repos" in ln)
+        self.assertNotIn("NS_GITHUB_PROXY", api_line)
+
+    def test_start_ps1_verifies_before_extract(self):
+        src = self._read("start.ps1")
+        body = src[src.index("function Get-Mihomo("):]
+        self.assertLess(body.index("Get-ExpectedSha256 $version"), body.index("Expand-Archive"))
+        api_line = next(ln for ln in src.splitlines() if "api.github.com/repos" in ln)
+        self.assertNotIn("NS_GITHUB_PROXY", api_line)
 
 
 if __name__ == "__main__":

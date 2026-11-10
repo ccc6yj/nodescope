@@ -5,6 +5,7 @@
 #   NS_MIHOMO_BIN      已有的 mihomo 路径（设置后不再查找/下载）
 #   NS_MIHOMO_VERSION  固定下载的 mihomo 版本，如 v1.19.33（默认自动跟随最新正式版）
 #   NS_GITHUB_PROXY    GitHub 下载加速前缀，如 https://ghfast.top/
+#   NS_MIHOMO_SHA256   手动指定下载包（.zip）的 SHA256；默认从 api.github.com 取官方值做校验
 #   PIP_INDEX_URL      pip 镜像，如 https://pypi.tuna.tsinghua.edu.cn/simple
 #
 # 注意：本文件须保存为 UTF-8 with BOM，否则 Windows PowerShell 5.1 会按 ANSI 读取导致中文乱码/解析失败。
@@ -104,6 +105,20 @@ function Resolve-LatestMihomo {
     return $null
 }
 
+# 返回官方发布的下载包 SHA256（小写十六进制），取不到时返回 $null。
+# 直连 api.github.com 读 release 资产的 digest，刻意不走 NS_GITHUB_PROXY：
+# 校验值和文件若来自同一个第三方加速站，对方改了文件也能一并改掉校验值。
+function Get-ExpectedSha256($version, $asset) {
+    if ($env:NS_MIHOMO_SHA256) { return $env:NS_MIHOMO_SHA256.Trim().ToLower() }
+    try {
+        $rel = Invoke-RestMethod -Uri "https://api.github.com/repos/MetaCubeX/mihomo/releases/tags/$version" `
+            -Headers @{ 'User-Agent' = 'nodescope'; 'Accept' = 'application/vnd.github+json' } -TimeoutSec 15 -UseBasicParsing
+        $item = $rel.assets | Where-Object { $_.name -eq $asset } | Select-Object -First 1
+        if ($item -and "$($item.digest)" -match '^sha256:([0-9a-fA-F]{64})$') { return $Matches[1].ToLower() }
+    } catch { }
+    return $null
+}
+
 # 下载指定版本到 bin\mihomo.exe；成功返回 $true，失败只打印原因，由调用方决定是否退出
 function Get-Mihomo($version) {
     # 32 位 PowerShell 跑在 64 位系统上时，真实架构在 PROCESSOR_ARCHITEW6432 里
@@ -128,6 +143,18 @@ function Get-Mihomo($version) {
             Write-Host ("下载失败：$url`n  访问 GitHub 慢可设置加速前缀后重试（cmd 中执行）：`n" +
                         "    set `"NS_GITHUB_PROXY=https://ghfast.top/`"`n    start.bat") -ForegroundColor Red
             return $false
+        }
+        # 解压、试运行之前先校验：下载到的是要在本机执行的二进制，经第三方加速站时尤其不能直接信
+        $wantSum = Get-ExpectedSha256 $version $asset
+        if ($wantSum) {
+            $gotSum = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLower()
+            if ($gotSum -ne $wantSum) {
+                Write-Host ("mihomo 下载包校验失败，已丢弃（文件可能被篡改或下载不完整）：`n" +
+                            "  期望 SHA256 $wantSum`n  实际 SHA256 $gotSum`n  来源 $url") -ForegroundColor Red
+                return $false
+            }
+        } else {
+            Write-Host '提示：未能从 api.github.com 取得官方 SHA256，本次下载未做完整性校验（可用 NS_MIHOMO_SHA256 手动指定）' -ForegroundColor Yellow
         }
         Remove-Item $tmpDir -Recurse -Force -ErrorAction SilentlyContinue
         try {

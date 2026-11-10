@@ -6,6 +6,7 @@
 #   NS_MIHOMO_BIN      已有的 mihomo 路径（设置后不再查找/下载）
 #   NS_MIHOMO_VERSION  固定下载的 mihomo 版本，如 v1.19.33（默认自动跟随最新正式版）
 #   NS_GITHUB_PROXY    GitHub 下载加速前缀，如 https://ghfast.top/
+#   NS_MIHOMO_SHA256   手动指定下载包（.gz）的 SHA256；默认从 api.github.com 取官方值做校验
 #   PIP_INDEX_URL      pip 镜像，如 https://pypi.tuna.tsinghua.edu.cn/simple
 set -euo pipefail
 
@@ -80,9 +81,44 @@ resolve_latest() {
   return 0
 }
 
+# 输出官方发布的下载包 SHA256（小写十六进制），取不到时输出空。
+# 直连 api.github.com 读 release 资产的 digest，刻意不走 NS_GITHUB_PROXY：
+# 校验值和文件若来自同一个第三方加速站，对方改了文件也能一并改掉校验值。
+expected_sha256() {
+  local version="$1" asset="$2"
+  if [ -n "${NS_MIHOMO_SHA256:-}" ]; then
+    printf '%s\n' "$NS_MIHOMO_SHA256" | tr 'A-F' 'a-f'; return
+  fi
+  curl -fsS --connect-timeout 5 -m 15 -H 'Accept: application/vnd.github+json' \
+      "https://api.github.com/repos/MetaCubeX/mihomo/releases/tags/$version" 2>/dev/null |
+    "$PY" -c '
+import json, sys
+try:
+    assets = json.load(sys.stdin).get("assets") or []
+except Exception:
+    sys.exit(0)
+for a in assets:
+    digest = str(a.get("digest") or "")
+    if a.get("name") == sys.argv[1] and digest.startswith("sha256:"):
+        print(digest[7:].lower())
+        break
+' "$asset" 2>/dev/null || true
+}
+
+file_sha256() {
+  "$PY" -c '
+import hashlib, sys
+h = hashlib.sha256()
+with open(sys.argv[1], "rb") as f:
+    for block in iter(lambda: f.read(1 << 20), b""):
+        h.update(block)
+print(h.hexdigest())
+' "$1"
+}
+
 # 下载指定版本到 bin/mihomo；成功返回 0，失败只打印原因并返回 1，由调用方决定是否退出
 download_mihomo() {
-  local version="$1" os arch asset url tmp
+  local version="$1" os arch asset url tmp want_sum got_sum
   case "$(uname -s)" in
     Darwin) os=darwin ;;
     Linux)  os=linux ;;
@@ -108,6 +144,21 @@ download_mihomo() {
     echo "下载失败：$url
   访问 GitHub 慢可设置加速前缀后重试，如：NS_GITHUB_PROXY=https://ghfast.top/ ./start.sh" >&2
     return 1
+  fi
+  # 解压、试运行之前先校验：下载到的是要在本机执行的二进制，经第三方加速站时尤其不能直接信
+  want_sum="$(expected_sha256 "$version" "$asset")"
+  if [ -n "$want_sum" ]; then
+    got_sum="$(file_sha256 "$tmp.gz")"
+    if [ "$got_sum" != "$want_sum" ]; then
+      rm -f "$tmp" "$tmp.gz"; trap - EXIT
+      echo "mihomo 下载包校验失败，已丢弃（文件可能被篡改或下载不完整）：
+  期望 SHA256 $want_sum
+  实际 SHA256 $got_sum
+  来源 $url" >&2
+      return 1
+    fi
+  else
+    printf '\033[33m提示：\033[0m未能从 api.github.com 取得官方 SHA256，本次下载未做完整性校验（可用 NS_MIHOMO_SHA256 手动指定）\n' >&2
   fi
   if ! gunzip -c "$tmp.gz" > "$tmp" || ! chmod +x "$tmp" || ! "$tmp" -v >/dev/null 2>&1; then
     rm -f "$tmp" "$tmp.gz"; trap - EXIT

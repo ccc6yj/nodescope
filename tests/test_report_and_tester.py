@@ -94,11 +94,18 @@ class TestReportAndTester(unittest.TestCase):
         resp_nf_fail = MagicMock()
         resp_nf_fail.status_code = 200
         resp_nf_fail.url = "https://www.netflix.com/title/80018499"
-        resp_nf_fail.text = '<html>Oh no! Something went wrong</html>'
+        # Netflix 用 stream 读取并以 with 关闭响应，正文从 iter_content 取
+        resp_nf_fail.__enter__.return_value = resp_nf_fail
+        resp_nf_fail.iter_content.return_value = [b'<html>Oh no! Something went wrong</html>']
 
         mock_get.return_value = resp_nf_fail
         res = tester.check_unlocks(None, country_code="NL")
         self.assertFalse(res["netflix"], "Netflix 出现错误页应判定为未解锁")
+
+        # 3. 同样的响应去掉错误提示即为解锁，确认上面的 False 确实来自 "Oh no!" 而不是别的分支
+        resp_nf_fail.iter_content.return_value = [b'<html>Stranger Things</html>']
+        res = tester.check_unlocks(None, country_code="NL")
+        self.assertTrue(res["netflix"])
 
 
     def test_ip_quality_classification(self):

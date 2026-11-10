@@ -171,6 +171,29 @@ def fetch_node_geo(port, timeout=3.5):
     return None
 
 
+# 解锁检测要经节点打开各平台页面，消耗的是订阅流量（实测压缩后 Netflix 约 400KB、
+# TikTok 约 90KB），所以能提前下结论的就不读完整页。
+# Netflix 正常剧集页有 2MB 多，而错误页（"Oh no!"、404）是不到 100KB 的独立小页面，
+# 读到这个长度还没出现错误提示即可认定不是错误页。
+_NETFLIX_HEAD_BYTES = 128 * 1024
+_TIKTOK_REGION_RE = re.compile(rb'"region":"([A-Z]{2})"')
+
+
+def _read_head(resp, limit=None, until=None):
+    """流式读取响应正文（需以 stream=True 请求），读满 limit 字节或 until(已读内容) 为真即停。
+
+    返回已读到的 bytes；调用方负责关闭响应，剩余正文随连接关闭而丢弃，不再占用流量。
+    """
+    buf = bytearray()
+    for chunk in resp.iter_content(chunk_size=16384):
+        buf.extend(chunk)
+        if limit is not None and len(buf) >= limit:
+            break
+        if until is not None and until(buf):
+            break
+    return bytes(buf)
+
+
 def check_unlocks(port, timeout=2.5, country_code=None):
     """检测节点对常用海外服务（AI与主流流媒体）的解锁情况。"""
     proxies = _proxies(port)
@@ -294,18 +317,20 @@ def check_unlocks(port, timeout=2.5, country_code=None):
 
     def _test_netflix():
         try:
-            resp = requests.get(
+            with requests.get(
                 "https://www.netflix.com/title/80018499",
                 proxies=proxies,
                 headers=headers,
                 timeout=(timeout, timeout),
+                stream=True,
                 allow_redirects=True,
-            )
-            url = getattr(resp, "url", "")
-            if resp.status_code == 200 and "title/80018499" in url:
-                # 若包含 Netflix 的 "Oh no!" 错误页，则说明该 IP 被封禁或重定向
-                return "oh no!" not in resp.text.lower()
-            return False
+            ) as resp:
+                url = getattr(resp, "url", "")
+                if resp.status_code == 200 and "title/80018499" in url:
+                    # 若包含 Netflix 的 "Oh no!" 错误页，则说明该 IP 被封禁或重定向
+                    head = _read_head(resp, limit=_NETFLIX_HEAD_BYTES)
+                    return b"oh no!" not in head.lower()
+                return False
         except Exception:
             return False
 
@@ -331,17 +356,19 @@ def check_unlocks(port, timeout=2.5, country_code=None):
         try:
             # 首页会先下发 WAF 人机验证页（"Please wait..."），判断不了解锁；
             # explore 页直接输出服务端识别的地区 "region":"JP"，以它为准
-            resp = requests.get(
+            with requests.get(
                 "https://www.tiktok.com/explore",
                 proxies=proxies,
                 headers=headers,
                 timeout=(timeout, timeout),
+                stream=True,
                 allow_redirects=True,
-            )
-            if resp.status_code != 200:
-                return False
-            m = re.search(r'"region":"([A-Z]{2})"', resp.text)
-            return bool(m) and m.group(1) not in ("CN", "HK")
+            ) as resp:
+                if resp.status_code != 200:
+                    return False
+                # region 出现在页面前三分之一处，读到第一处就停，结论与读完整页相同
+                m = _TIKTOK_REGION_RE.search(_read_head(resp, until=_TIKTOK_REGION_RE.search))
+                return bool(m) and m.group(1) not in (b"CN", b"HK")
         except Exception:
             return False
 
@@ -546,17 +573,43 @@ def _pick_speed_urls(port, headers, timeout, probe_seconds=1.5,
     return found
 
 
+# 计速时剔除的起步爬坡段：传输时长的 30%，最多 1 秒。
+# TCP 慢启动阶段速率远低于稳态；流量上限让快节点不到 1 秒就停时，
+# 整段几乎都在爬坡，按首字节起算的平均值会把快节点系统性测低。
+_RAMP_FRACTION = 0.3
+_RAMP_MAX_SECONDS = 1.0
+# 采样点间隔（秒）与剔除爬坡后至少要剩下的计速时长
+_MARK_INTERVAL = 0.05
+_MIN_STEADY_SECONDS = 0.2
+
+
+def _steady_window(marks, t0, t_end, total):
+    """剔除起步爬坡段后用于计速的 (字节数, 秒)。
+
+    marks 是按时间递增的 (时刻, 截至该时刻的累计字节) 采样点。剩余时长不足
+    _MIN_STEADY_SECONDS，或爬坡段之后再没有数据（中途断流）时，退回按整段计，
+    避免拿极短的片段算出虚高的数字。
+    """
+    cut = t0 + min(_RAMP_MAX_SECONDS, (t_end - t0) * _RAMP_FRACTION)
+    for t, done in marks:
+        if t >= cut:
+            if t_end - t >= _MIN_STEADY_SECONDS and total > done:
+                return total - done, t_end - t
+            break
+    return total, max(t_end - t0, _MIN_STEADY_SECONDS)
+
+
 def _download_one(port, url, seconds, threads, headers, timeout,
                   budget, cancel_event, live_cb=None):
-    """对单个测速 URL 并发拉取，支持实时速率回调 live_cb(mbps)，返回 (bytes, 传输耗时秒)。
+    """对单个测速 URL 并发拉取，支持实时速率回调 live_cb(mbps)，返回计速用的 (bytes, 耗时秒)。
 
     测速窗口从首字节开始计 seconds 秒，耗时按「首字节 → 停止」计算：
-    经代理的 TCP/TLS 握手可能要 1s 以上，算进去会把高延迟节点的速度系统性测低，
-    也会让实时速率（同样按首字节起算）和最终结果对不上。
+    经代理的 TCP/TLS 握手可能要 1s 以上，算进去会把高延迟节点的速度系统性测低。
+    返回值已剔除起步爬坡段（见 _steady_window）；实时速率用同一口径，和最终结果对得上。
     """
     stop = threading.Event()
     monitor_stop = threading.Event()
-    xfer = {"bytes": 0, "t0": None, "t_stop": None, "lock": threading.Lock()}
+    xfer = {"bytes": 0, "t0": None, "t_stop": None, "marks": [], "lock": threading.Lock()}
     req_timeout = (max(timeout, 8), max(timeout, 12))
     # 兜底截止：首字节迟迟不来（握手极慢）时不能无限等下去
     hard_deadline = time.monotonic() + req_timeout[0] + seconds
@@ -567,6 +620,9 @@ def _download_one(port, url, seconds, threads, headers, timeout,
             if xfer["t0"] is None:
                 xfer["t0"] = now
             xfer["bytes"] += n
+            marks = xfer["marks"]
+            if not marks or now - marks[-1][0] >= _MARK_INTERVAL:
+                marks.append((now, xfer["bytes"]))
         return now
 
     def deadline():
@@ -609,7 +665,7 @@ def _download_one(port, url, seconds, threads, headers, timeout,
             while fetch_once() and not _cancelled(cancel_event) and not stop.is_set():
                 pass
 
-    # 实时速率采样监控（每 0.2 秒向 live_cb 报告首字节以来的平均速率）
+    # 实时速率采样监控（每 0.2 秒向 live_cb 报告剔除爬坡段后的平均速率）
     def monitor():
         while not monitor_stop.wait(0.2):
             if stop.is_set() or _cancelled(cancel_event):
@@ -617,12 +673,13 @@ def _download_one(port, url, seconds, threads, headers, timeout,
             with xfer["lock"]:
                 b = xfer["bytes"]
                 t0 = xfer["t0"]
+                marks = list(xfer["marks"])
             if t0 is None or b <= 0:
                 continue
-            elapsed = time.monotonic() - t0
-            if elapsed > 0 and live_cb:
+            got, elapsed = _steady_window(marks, t0, time.monotonic(), b)
+            if live_cb:
                 with contextlib.suppress(Exception):  # 实时速率回调失败不影响测速
-                    live_cb(round(b * 8 / elapsed / 1e6, 1))
+                    live_cb(round(got * 8 / elapsed / 1e6, 1))
 
     mon_thread = threading.Thread(target=monitor, daemon=True)
     mon_thread.start()
@@ -642,12 +699,13 @@ def _download_one(port, url, seconds, threads, headers, timeout,
         got = xfer["bytes"]
         t0 = xfer["t0"]
         t_stop = xfer["t_stop"]
+        marks = list(xfer["marks"])
     if not got or t0 is None:
         return 0, 0.0
     # 没有主动停止（数据中途断流、连接被断）时按全部结束时刻计，
     # 断流的等待时间算进耗时，避免只有前几百毫秒有数据时算出虚假高带宽
     t_end = t_stop if t_stop is not None else time.monotonic()
-    return got, max(t_end - t0, 0.2)
+    return _steady_window(marks, t0, t_end, got)
 
 
 def measure_download(port, seconds=5, threads=6, timeout=8, max_bytes=None,
