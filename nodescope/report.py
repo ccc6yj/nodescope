@@ -387,8 +387,9 @@ def export_html(results, path, source=None, userinfo=None, show_unlock=False):
 
     body = "\n".join(rows)
 
-    th_unlock = '<th data-k="unlock">解锁<span class="arrow"></span></th>' if has_unlock else ''
-    th_ip = '<th data-k="ip" title="出口 IP 类型与风险，悬停看 ISP / ASN">IP<span class="arrow"></span></th>' if has_ip else ''
+    sort_svg = '<svg class="sort-arrow" viewBox="0 0 10 10" fill="currentColor" aria-hidden="true"><path d="M5 2.2 8.6 7.4H1.4Z"/></svg>'
+    th_unlock = f'<th data-k="unlock" tabindex="0" aria-sort="none">解锁{sort_svg}</th>' if has_unlock else ''
+    th_ip = f'<th data-k="ip" tabindex="0" aria-sort="none" title="出口 IP 类型与风险，悬停看 ISP / ASN">IP{sort_svg}</th>' if has_ip else ''
     page = f"""<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -396,28 +397,47 @@ def export_html(results, path, source=None, userinfo=None, show_unlock=False):
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>节点测试报告 - {now}</title>
 <style>
+  :root {{
+    --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+    --ease-spring: cubic-bezier(0.32, 0.72, 0, 1);
+    --ease-in: cubic-bezier(0.4, 0, 1, 1);
+    --dur-instant: 100ms;
+    --dur-fast: 160ms;
+    --dur-normal: 240ms;
+    --dur-slow: 300ms;
+  }}
   * {{ box-sizing: border-box; margin: 0; padding: 0; }}
   body {{ font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
-         background: #0f1117; color: #e6e6e6; padding: 32px 24px; }}
+         background: #0f1117; color: #e6e6e6; padding: 32px 24px; -webkit-font-smoothing: antialiased; }}
   .wrap {{ max-width: 1080px; margin: 0 auto; }}
   h1 {{ font-size: 22px; font-weight: 600; margin-bottom: 6px; }}
   .meta {{ color: #7c8497; font-size: 13px; margin-bottom: 4px; }}
   .cards {{ display: flex; gap: 12px; margin: 20px 0; flex-wrap: wrap; }}
   .card {{ flex: 1; min-width: 140px; background: #171a23; border: 1px solid #232838;
           border-radius: 10px; padding: 14px 18px; }}
-  .card-num {{ font-size: 24px; font-weight: 700; }}
+  .card-num {{ font-size: 24px; font-weight: 700; font-variant-numeric: tabular-nums; }}
   .card-num.good {{ color: #4ade80; }} .card-num.bad {{ color: #f87171; }}
   .card-num.mid {{ color: #fbbf24; }}
   .card-label {{ color: #7c8497; font-size: 12px; margin-top: 4px; }}
-  table {{ width: 100%; border-collapse: collapse; background: #171a23;
-          border: 1px solid #232838; border-radius: 10px; overflow: hidden;
-          font-size: 13.5px; }}
+  .table-wrap {{ background: #171a23; border: 1px solid #232838; border-radius: 10px; overflow-x: auto; }}
+  table {{ width: 100%; border-collapse: collapse; font-size: 13.5px; }}
   th {{ background: #1c2130; text-align: left; padding: 11px 14px; color: #9aa4bb;
-       font-weight: 600; cursor: pointer; user-select: none; white-space: nowrap; }}
-  th:hover {{ color: #e6e6e6; }}
-  th .arrow {{ font-size: 10px; margin-left: 4px; }}
-  td {{ padding: 10px 14px; border-top: 1px solid #20263a; }}
-  tr:hover td {{ background: #1a1f2e; }}
+       font-weight: 600; cursor: pointer; user-select: none; white-space: nowrap;
+       transition: color var(--dur-fast) var(--ease-out); }}
+  th:first-child {{ border-top-left-radius: 9px; }}
+  th:last-child {{ border-top-right-radius: 9px; }}
+  th:focus-visible {{ outline: 2px solid #8595ff; outline-offset: -2px; }}
+  th .sort-arrow {{
+    display: inline-block; width: 10px; height: 10px; margin-left: 4px;
+    vertical-align: -1px; color: #8595ff;
+    opacity: 0; transform: scale(.75);
+    transition: opacity var(--dur-fast) var(--ease-out), transform var(--dur-fast) var(--ease-spring);
+  }}
+  th[aria-sort="ascending"] .sort-arrow {{ opacity: 1; transform: rotate(0deg) scale(1); }}
+  th[aria-sort="descending"] .sort-arrow {{ opacity: 1; transform: rotate(180deg) scale(1); }}
+  th[aria-sort="ascending"], th[aria-sort="descending"] {{ color: #e6e6e6; }}
+  td {{ padding: 10px 14px; border-top: 1px solid #20263a;
+       transition: background-color var(--dur-fast) var(--ease-out); }}
   .num {{ font-variant-numeric: tabular-nums; }}
   td.num {{ text-align: left; }}
   .dim {{ color: #5b6478; }}
@@ -430,25 +450,44 @@ def export_html(results, path, source=None, userinfo=None, show_unlock=False):
   .badge.mid {{ background: #332a10; color: #fbbf24; }}
   .badge.bad {{ background: #371a1a; color: #f87171; }}
   .badge.plain {{ background: #1f2937; color: #cbd5e1; }}
-  .icon-badge {{ display: inline-flex; border-radius: 4px; cursor: pointer; vertical-align: middle; transition: transform 0.12s ease; }}
-  .icon-badge:hover {{ transform: scale(1.2); z-index: 10; }}
+  .icon-badge {{ display: inline-flex; border-radius: 4px; cursor: default; vertical-align: middle;
+                transition: transform var(--dur-fast) var(--ease-spring); }}
   [data-tip] {{ position: relative; cursor: default; }}
-  [data-tip]::before {{
-    content: ''; position: absolute; bottom: calc(100% + 2px); left: 50%;
-    transform: translateX(-50%); border-width: 4px 4px 0 4px; border-style: solid;
-    border-color: #0f172a transparent transparent transparent;
-    opacity: 0; visibility: hidden; transition: opacity 0.08s ease; z-index: 9999; pointer-events: none;
-  }}
   [data-tip]::after {{
-    content: attr(data-tip); position: absolute; bottom: calc(100% + 6px); left: 50%;
-    transform: translateX(-50%) translateY(2px); background: #0f172a; color: #f8fafc;
-    padding: 4px 8px; border-radius: 4px; font-size: 11px; font-weight: 500; line-height: 1.35;
-    white-space: nowrap; pointer-events: none; opacity: 0; visibility: hidden;
-    transition: opacity 0.08s ease, transform 0.08s ease;
-    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4); z-index: 9999;
+    content: attr(data-tip); display: none; position: absolute; bottom: calc(100% + 6px); left: 50%;
+    transform: translateX(-50%); background: #0f172a; color: #f8fafc;
+    padding: 4px 8px; border-radius: 5px; font-size: 11px; font-weight: 500; line-height: 1.35;
+    white-space: nowrap; pointer-events: none;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.45); z-index: 9999;
   }}
-  [data-tip]:hover::before,
-  [data-tip]:hover::after {{ opacity: 1; visibility: visible; transform: translateX(-50%) translateY(0); }}
+  tbody tr:first-child [data-tip]::after {{
+    bottom: auto; top: calc(100% + 6px);
+  }}
+  @keyframes tipIn {{
+    from {{ opacity: 0; transform: translateX(-50%) translateY(3px) scale(.96); }}
+    to {{ opacity: 1; transform: translateX(-50%) translateY(0) scale(1); }}
+  }}
+  @keyframes tipInDown {{
+    from {{ opacity: 0; transform: translateX(-50%) translateY(-3px) scale(.96); }}
+    to {{ opacity: 1; transform: translateX(-50%) translateY(0) scale(1); }}
+  }}
+  @media (hover: hover) {{
+    th:hover {{ color: #e6e6e6; }}
+    tr:hover td {{ background: #1a1f2e; }}
+    .icon-badge:hover {{ transform: translateY(-1px) scale(1.12); z-index: 10; }}
+    [data-tip]:hover::after {{
+      display: block;
+      animation: tipIn var(--dur-fast) var(--ease-out) 180ms both;
+    }}
+    tbody tr:first-child [data-tip]:hover::after {{
+      animation-name: tipInDown;
+    }}
+  }}
+  @media (prefers-reduced-motion: reduce) {{
+    :root {{ --dur-instant: 0.01ms; --dur-fast: 0.01ms; --dur-normal: 0.01ms; --dur-slow: 0.01ms; }}
+    th, th .sort-arrow, td, .icon-badge {{ transition: opacity 80ms linear !important; }}
+    [data-tip]:hover::after {{ animation: none !important; }}
+  }}
 </style>
 </head>
 <body>
@@ -458,27 +497,32 @@ def export_html(results, path, source=None, userinfo=None, show_unlock=False):
   {f'<div class="meta">订阅源: {esc(source)}</div>' if source else ''}
   {info_html}
   <div class="cards">{card_html}</div>
+  <div class="table-wrap">
   <table id="tbl">
     <thead><tr>
-      <th data-k="rank">#<span class="arrow"></span></th>
-      <th data-k="name">节点<span class="arrow"></span></th>
-      <th data-k="type">类型<span class="arrow"></span></th>
-      <th data-k="country">落地<span class="arrow"></span></th>
+      <th data-k="rank" tabindex="0" aria-sort="none">#{sort_svg}</th>
+      <th data-k="name" tabindex="0" aria-sort="none">节点{sort_svg}</th>
+      <th data-k="type" tabindex="0" aria-sort="none">类型{sort_svg}</th>
+      <th data-k="country" tabindex="0" aria-sort="none">落地{sort_svg}</th>
       {th_ip}
       {th_unlock}
-      <th data-k="latency" title="经节点端到端真实延迟（鼠标悬停查看直连入口延迟）">延迟<span class="arrow"></span></th>
-      <th data-k="speed">下载速度<span class="arrow"></span></th>
-      <th data-k="status">状态<span class="arrow"></span></th>
-      <th data-k="error">错误信息<span class="arrow"></span></th>
+      <th data-k="latency" tabindex="0" aria-sort="none" title="经节点端到端真实延迟（鼠标悬停查看直连入口延迟）">延迟{sort_svg}</th>
+      <th data-k="speed" tabindex="0" aria-sort="none">下载速度{sort_svg}</th>
+      <th data-k="status" tabindex="0" aria-sort="none">状态{sort_svg}</th>
+      <th data-k="error" tabindex="0" aria-sort="none">错误信息{sort_svg}</th>
     </tr></thead>
     <tbody>\n{body}\n</tbody>
   </table>
+  </div>
 </div>
 <script>
-// 点击表头排序（数字列按 data-v 排，文本列按内容排）
+// 点击或键盘排序，带轻量 FLIP 位移过渡（尊重 prefers-reduced-motion）
 const table = document.getElementById('tbl');
 const tbody = table.querySelector('tbody');
 const numKeys = new Set(['latency', 'speed', 'rank']);
+const mqReduce = window.matchMedia ? window.matchMedia('(prefers-reduced-motion: reduce)') : null;
+let reduceMotion = !!(mqReduce && mqReduce.matches);
+if (mqReduce && mqReduce.addEventListener) mqReduce.addEventListener('change', e => {{ reduceMotion = e.matches; }});
 let state = {{ key: null, asc: true }};
 function val(row, k) {{
   const idx = [...row.parentElement.parentElement.rows[0].cells]
@@ -492,26 +536,60 @@ function val(row, k) {{
   }}
   return cell.textContent.trim();
 }}
-table.querySelectorAll('th').forEach(th => th.addEventListener('click', () => {{
+function flipSort(mutate, animate) {{
+  if (!animate || reduceMotion) {{ mutate(); return; }}
+  const trs = [...tbody.rows];
+  const before = new Map(trs.map(tr => [tr, tr.getBoundingClientRect().top]));
+  mutate();
+  const moved = [];
+  for (const tr of trs) {{
+    clearTimeout(tr._t);
+    tr.style.transition = 'none';
+    tr.style.transform = '';
+    const dy = before.get(tr) - tr.getBoundingClientRect().top;
+    if (Math.abs(dy) < 1) {{ tr.style.transition = ''; continue; }}
+    moved.push([tr, dy]);
+  }}
+  if (!moved.length || moved.length > 40) {{
+    moved.forEach(([tr]) => {{ tr.style.transition = ''; }});
+    return;
+  }}
+  moved.forEach(([tr, dy]) => {{ tr.style.transform = `translate3d(0, ${{dy}}px, 0)`; }});
+  tbody.offsetHeight;
+  moved.forEach(([tr]) => {{
+    tr.style.transition = 'transform 300ms cubic-bezier(0.22, 1, 0.36, 1)';
+    tr.style.transform = '';
+    tr._t = setTimeout(() => {{ tr.style.transition = ''; }}, 340);
+  }});
+}}
+function sortBy(th, animate) {{
   const k = th.dataset.k;
   state.asc = state.key === k ? !state.asc : !(k === 'speed' || k === 'status');
   state.key = k;
-  table.querySelectorAll('.arrow').forEach(a => a.textContent = '');
-  const arrow = th.querySelector('.arrow');
-  if (arrow) arrow.textContent = state.asc ? '\u25b2' : '\u25bc';
-  const rows = [...tbody.rows].sort((a, b) => {{
-    const va = val(a, k), vb = val(b, k);
-    const cmp = typeof va === 'number' ? va - vb : va.localeCompare(vb, 'zh');
-    return state.asc ? cmp : -cmp;
+  table.querySelectorAll('th[data-k]').forEach(el => {{
+    el.setAttribute('aria-sort', el === th ? (state.asc ? 'ascending' : 'descending') : 'none');
   }});
-  rows.forEach((r, i) => {{
-    tbody.appendChild(r);
-    r.cells[0].textContent = i + 1;
+  flipSort(() => {{
+    const rows = [...tbody.rows].sort((a, b) => {{
+      const va = val(a, k), vb = val(b, k);
+      const cmp = typeof va === 'number' ? va - vb : va.localeCompare(vb, 'zh');
+      return state.asc ? cmp : -cmp;
+    }});
+    rows.forEach((r, i) => {{
+      tbody.appendChild(r);
+      r.cells[0].textContent = i + 1;
+    }});
+  }}, animate);
+}}
+table.querySelectorAll('th').forEach(th => {{
+  th.addEventListener('click', () => sortBy(th, true));
+  th.addEventListener('keydown', e => {{
+    if (e.key === 'Enter' || e.key === ' ') {{ e.preventDefault(); sortBy(th, true); }}
   }});
-}}));
-// 默认按速度降序
+}});
+// 默认按速度降序（静默初始化，不播无意义的首次位移动画）
 const speedTh = table.querySelector('th[data-k="speed"]');
-if (speedTh) speedTh.click();
+if (speedTh) sortBy(speedTh, false);
 </script>
 </body>
 </html>"""

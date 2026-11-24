@@ -19,8 +19,10 @@
     --accent-ink: #FFFFFF;
     --accent-soft: rgba(46, 67, 209, .08);
     --good: #0F7656;
+    --good-soft: rgba(15, 118, 86, .09);
     --mid: #9A5C0E;
     --bad: #C43D2B;
+    --bad-soft: rgba(196, 61, 43, .12);
     --track: #E1E6E4;
     --tip-bg: #18211F;
     --tip-ink: #F2F4F3;
@@ -28,6 +30,16 @@
     --seg-bg: #E6EAE8;
     --seg-on: #FFFFFF;
     --seg-shadow: 0 1px 2px rgba(24, 33, 31, .12), 0 0 0 .5px rgba(24, 33, 31, .08);
+    --pop-shadow: 0 12px 32px rgba(24, 33, 31, .14), 0 0 0 .5px rgba(24, 33, 31, .06);
+    --scroll-shadow: 0 6px 12px -6px rgba(24, 33, 31, .14);
+    /* 统一动效语言：临界阻尼曲线（快起、绵收、无过冲）+ 4 档节奏 */
+    --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+    --ease-spring: cubic-bezier(0.32, 0.72, 0, 1);
+    --ease-in: cubic-bezier(0.4, 0, 1, 1);
+    --dur-instant: 100ms;
+    --dur-fast: 160ms;
+    --dur-normal: 240ms;
+    --dur-slow: 300ms;
     /* 只用系统字体，不加载任何外部字体：数字用系统自带的 DIN 风格窄体
        （macOS: DIN Alternate，Windows: Bahnschrift），缺失时退回系统 UI 字体 */
     --num: "DIN Alternate", "Bahnschrift", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC", sans-serif;
@@ -39,9 +51,13 @@
       --bg: #131918; --field: #182020; --ink: #E3E9E7; --ink-2: #A7B2AF; --ink-3: #808C88;
       --rule: #2A3432; --rule-2: #212A28; --hover: rgba(227, 233, 231, .04);
       --accent: #8595FF; --accent-ink: #10152E; --accent-soft: rgba(133, 149, 255, .12);
-      --good: #4CC59A; --mid: #E2A64C; --bad: #F07A68; --track: #243030;
+      --good: #4CC59A; --good-soft: rgba(76, 197, 154, .12);
+      --mid: #E2A64C; --bad: #F07A68; --bad-soft: rgba(240, 122, 104, .16); --track: #243030;
       --tip-bg: #E3E9E7; --tip-ink: #131918;
-      --seg-bg: #0E1312; --seg-on: #2B3634; --seg-shadow: none;
+      --seg-bg: #0E1312; --seg-on: #2B3634;
+      --seg-shadow: 0 1px 2px rgba(0, 0, 0, .38), inset 0 .5px 0 rgba(255, 255, 255, .08);
+      --pop-shadow: 0 14px 36px rgba(0, 0, 0, .52), 0 0 0 .5px rgba(255, 255, 255, .08);
+      --scroll-shadow: 0 6px 14px -4px rgba(0, 0, 0, .48);
       color-scheme: dark;
     }
   }
@@ -49,9 +65,13 @@
     --bg: #131918; --field: #182020; --ink: #E3E9E7; --ink-2: #A7B2AF; --ink-3: #808C88;
     --rule: #2A3432; --rule-2: #212A28; --hover: rgba(227, 233, 231, .04);
     --accent: #8595FF; --accent-ink: #10152E; --accent-soft: rgba(133, 149, 255, .12);
-    --good: #4CC59A; --mid: #E2A64C; --bad: #F07A68; --track: #243030;
+    --good: #4CC59A; --good-soft: rgba(76, 197, 154, .12);
+    --mid: #E2A64C; --bad: #F07A68; --bad-soft: rgba(240, 122, 104, .16); --track: #243030;
     --tip-bg: #E3E9E7; --tip-ink: #131918;
-      --seg-bg: #0E1312; --seg-on: #2B3634; --seg-shadow: none;
+    --seg-bg: #0E1312; --seg-on: #2B3634;
+    --seg-shadow: 0 1px 2px rgba(0, 0, 0, .38), inset 0 .5px 0 rgba(255, 255, 255, .08);
+    --pop-shadow: 0 14px 36px rgba(0, 0, 0, .52), 0 0 0 .5px rgba(255, 255, 255, .08);
+    --scroll-shadow: 0 6px 14px -4px rgba(0, 0, 0, .48);
     color-scheme: dark;
   }
 
@@ -67,26 +87,55 @@
     height: 100vh; height: 100dvh; max-width: 1280px; margin: 0 auto;
     display: flex; flex-direction: column; padding: 32px 32px 16px;
   }
-  /* 首页与结果页两个视图，同一时刻只显示一个 */
-  .view { flex: 1; min-height: 0; display: flex; flex-direction: column; }
-  body[data-view="home"] #results, body[data-view="results"] #home { display: none; }
+  /* 首页与结果页叠放：纯 CSS 过渡实现双向可打断的层次切换 */
+  .views { position: relative; flex: 1; min-height: 0; }
+  .view {
+    position: absolute; inset: 0; min-height: 0; display: flex; flex-direction: column;
+    transition: opacity var(--dur-slow) var(--ease-out),
+                transform var(--dur-slow) var(--ease-out),
+                visibility 0s linear var(--dur-slow);
+  }
+  body[data-view="home"] #home,
+  body[data-view="results"] #results {
+    opacity: 1; transform: translate3d(0, 0, 0) scale(1);
+    visibility: visible; pointer-events: auto;
+    transition: opacity var(--dur-slow) var(--ease-out),
+                transform var(--dur-slow) var(--ease-out),
+                visibility 0s linear 0s;
+  }
+  body[data-view="home"] #results {
+    opacity: 0; transform: translate3d(12px, 0, 0);
+    visibility: hidden; pointer-events: none;
+  }
+  body[data-view="results"] #home {
+    opacity: 0; transform: translate3d(-10px, 0, 0) scale(.992);
+    visibility: hidden; pointer-events: none;
+  }
   button, input, select { font: inherit; color: inherit; }
   :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
   .btn {
+    display: inline-flex; align-items: center; justify-content: center; gap: 5px;
     border: 1px solid transparent; border-radius: 8px; padding: 0 22px; height: 44px;
     font-size: 14px; font-weight: 600; cursor: pointer; white-space: nowrap;
-    background: var(--accent); color: var(--accent-ink);
-    transition: background-color .15s, border-color .15s, color .15s, opacity .15s;
+    background: var(--accent); color: var(--accent-ink); user-select: none;
+    transition: background-color var(--dur-fast) var(--ease-out),
+                border-color var(--dur-fast) var(--ease-out),
+                color var(--dur-fast) var(--ease-out),
+                opacity var(--dur-fast) var(--ease-out),
+                transform var(--dur-instant) var(--ease-spring),
+                filter var(--dur-fast) var(--ease-out);
   }
-  .btn:hover { filter: brightness(1.08); }
+  .btn:active:not(:disabled) { transform: scale(.975); }
   .btn.stop { background: var(--bad); color: #fff; }
   .btn.ghost {
     background: transparent; border-color: var(--rule); color: var(--ink-2);
     height: 34px; padding: 0 14px; font-size: 13px; font-weight: 500;
   }
-  .btn.ghost:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); filter: none; }
+  .btn.ghost.done { border-color: color-mix(in srgb, var(--good) 55%, transparent); color: var(--good); background: var(--good-soft); }
   .btn:disabled { opacity: .45; cursor: not-allowed; }
+  #exportNodesBtn { min-width: 112px; }
+  #pngBtn { min-width: 96px; }
 
   /* ---------- 首页 ---------- */
   .home-head { display: flex; align-items: baseline; gap: 16px; flex-wrap: wrap; }
@@ -97,34 +146,67 @@
   #src {
     flex: 1; min-width: 0; background: var(--field); border: 1px solid var(--rule);
     border-radius: 8px; padding: 12px 16px; font-size: 14px; outline: none;
-    transition: border-color .15s, box-shadow .15s;
+    transition: border-color var(--dur-fast) var(--ease-out),
+                box-shadow var(--dur-fast) var(--ease-out),
+                background-color var(--dur-fast) var(--ease-out);
   }
   #src::placeholder { color: var(--ink-3); }
   #src:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+  #src.shake {
+    border-color: var(--bad); box-shadow: 0 0 0 3px var(--bad-soft);
+    animation: inputShake 260ms var(--ease-out);
+  }
+  #src.flash { box-shadow: 0 0 0 3px var(--accent-soft); border-color: var(--accent); }
+  @keyframes inputShake {
+    0%, 100% { transform: translateX(0); }
+    20% { transform: translateX(-4px); }
+    45% { transform: translateX(4px); }
+    70% { transform: translateX(-2.5px); }
+    88% { transform: translateX(1.5px); }
+  }
   #go { min-width: 112px; }
 
-  /* 选项：分段按钮组 */
+  /* 选项：分段按钮组（带真实滑动浮块） */
   .opts {
     display: flex; flex-wrap: wrap; align-items: center; gap: 14px 28px;
     margin-top: 16px; font-size: 13px; color: var(--ink-2);
   }
-  .opt { display: flex; align-items: center; gap: 10px; border: 0; }
+  .opt {
+    display: flex; align-items: center; gap: 10px; border: 0;
+    transition: opacity var(--dur-fast) var(--ease-out);
+  }
   .opt > span:first-child { color: var(--ink-3); white-space: nowrap; }
   fieldset.speed-opts { display: contents; border: 0; }
   fieldset.speed-opts:disabled .opt { opacity: .4; }
   fieldset.speed-opts:disabled .seg label { cursor: not-allowed; }
-  .seg { display: inline-flex; border-radius: 8px; padding: 2px; background: var(--seg-bg); }
-  .seg label { position: relative; cursor: pointer; }
+  .seg { position: relative; display: inline-flex; border-radius: 8px; padding: 2px; background: var(--seg-bg); }
+  .seg-thumb {
+    position: absolute; top: 2px; bottom: 2px; left: 0; border-radius: 6px;
+    background: var(--seg-on); box-shadow: var(--seg-shadow);
+    pointer-events: none; z-index: 0; opacity: 0;
+  }
+  .seg.ready .seg-thumb {
+    opacity: 1;
+    transition: transform var(--dur-normal) var(--ease-spring),
+                width var(--dur-normal) var(--ease-spring),
+                opacity var(--dur-fast) var(--ease-out);
+  }
+  .seg.positioned .seg-thumb { opacity: 1; }
+  .seg label { position: relative; z-index: 1; cursor: pointer; }
   .seg input { position: absolute; opacity: 0; pointer-events: none; }
   .seg span {
     display: block; padding: 4px 11px; border-radius: 6px; white-space: nowrap; color: var(--ink-2);
-    font-variant-numeric: tabular-nums; transition: background-color .12s, color .12s, box-shadow .12s;
+    font-weight: 500; font-variant-numeric: tabular-nums; user-select: none;
+    transition: color var(--dur-fast) var(--ease-out), transform var(--dur-instant) var(--ease-spring);
   }
-  .seg label:hover span { color: var(--ink); }
-  .seg input:checked + span { background: var(--seg-on); color: var(--ink); box-shadow: var(--seg-shadow); }
+  .seg label:active span { transform: scale(.965); }
+  .seg input:checked + span { color: var(--ink); }
   .seg input:focus-visible + span { outline: 2px solid var(--accent); outline-offset: 1px; }
-  .check { display: inline-flex; align-items: center; gap: 7px; cursor: pointer; color: var(--ink-2); }
-  .check input { accent-color: var(--accent); width: 15px; height: 15px; }
+  .check {
+    display: inline-flex; align-items: center; gap: 7px; cursor: pointer; color: var(--ink-2);
+    user-select: none; transition: color var(--dur-fast) var(--ease-out);
+  }
+  .check input { accent-color: var(--accent); width: 15px; height: 15px; cursor: pointer; }
 
   /* 引导区：最近测过 + 说明，内容多时只在区内滚动 */
   .intro {
@@ -132,57 +214,111 @@
     display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr); gap: 56px; align-content: start;
   }
   .intro h2 { font-size: 13px; font-weight: 500; color: var(--ink-3); margin-bottom: 10px; }
-  .recent-none { font-size: 13px; color: var(--ink-3); padding: 12px 0; border-top: 1px solid var(--rule); }
+  .recent-none {
+    font-size: 13px; color: var(--ink-3); padding: 12px 0; border-top: 1px solid var(--rule);
+    animation: fadeIn var(--dur-normal) var(--ease-out);
+  }
   .recent-list { display: flex; flex-direction: column; border-top: 1px solid var(--rule); }
   .recent-item {
     display: grid; grid-template-columns: 1fr auto auto; align-items: center; gap: 16px;
-    border-bottom: 1px solid var(--rule-2); padding: 0 4px 0 0;
+    border-bottom: 1px solid var(--rule-2); padding: 0 4px 0 0; overflow: hidden;
+    transition: background-color var(--dur-fast) var(--ease-out),
+                box-shadow var(--dur-fast) var(--ease-out),
+                opacity var(--dur-normal) var(--ease-in),
+                transform var(--dur-normal) var(--ease-in),
+                max-height var(--dur-normal) var(--ease-out);
   }
-  .recent-item:hover { background: var(--hover); }
+  .recent-item.removing {
+    opacity: 0; transform: translateX(-8px); pointer-events: none;
+    border-bottom-color: transparent;
+  }
   .recent-item.selected { box-shadow: inset 3px 0 0 var(--accent); background: var(--accent-soft); }
   .recent-item.selected .recent-src { color: var(--accent); }
   .recent-fill {
-    all: unset; cursor: pointer; padding: 10px 4px; min-width: 0;
+    all: unset; cursor: pointer; padding: 10px 4px 10px 8px; min-width: 0;
     display: flex; align-items: baseline; gap: 12px;
   }
   .recent-fill:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
-  .recent-src { font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .recent-src {
+    font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    transition: color var(--dur-fast) var(--ease-out);
+  }
   .recent-meta { font-size: 12.5px; color: var(--ink-3); white-space: nowrap; font-variant-numeric: tabular-nums; }
   .recent-ok { font-family: var(--num); font-size: 14px; font-weight: 600; color: var(--good); white-space: nowrap; }
   .recent-del {
     all: unset; cursor: pointer; color: var(--ink-3); width: 26px; height: 26px; border-radius: 6px;
     display: grid; place-items: center; font-size: 15px;
+    transition: color var(--dur-fast) var(--ease-out),
+                background-color var(--dur-fast) var(--ease-out),
+                transform var(--dur-instant) var(--ease-spring);
   }
-  .recent-del:hover { color: var(--bad); background: var(--hover); }
+  .recent-del:active { transform: scale(.9); }
   .recent-del:focus-visible { outline: 2px solid var(--accent); }
-
 
   /* ---------- 结果页 ---------- */
   .res-head { display: flex; align-items: center; gap: 14px; }
   .back {
     all: unset; flex: none; display: inline-flex; align-items: center; gap: 6px;
     height: 36px; padding: 0 14px 0 10px; border: 1px solid var(--rule); border-radius: 8px;
-    color: var(--ink-2); font-size: 13px; cursor: pointer; transition: border-color .15s, color .15s;
+    color: var(--ink-2); font-size: 13px; cursor: pointer; user-select: none;
+    transition: border-color var(--dur-fast) var(--ease-out),
+                color var(--dur-fast) var(--ease-out),
+                transform var(--dur-instant) var(--ease-spring);
   }
-  .back:hover { border-color: var(--accent); color: var(--accent); }
+  .back:active { transform: scale(.97); }
   .back:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-  .back svg { width: 14px; height: 14px; }
+  .back svg { width: 14px; height: 14px; transition: transform var(--dur-fast) var(--ease-spring); }
   .res-title { flex: 1; min-width: 0; display: flex; align-items: baseline; gap: 14px; }
   .res-title h1 { font-size: 20px; white-space: nowrap; }
   .res-src { color: var(--ink-3); font-size: 13px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   #runBtn { height: 36px; min-width: 104px; padding: 0 18px; }
 
-  /* 进度线 */
-  .bar { flex: none; height: 2px; margin-top: 18px; background: var(--rule-2); overflow: hidden; }
-  .bar-fill { height: 100%; width: 0; background: var(--accent); transition: width .3s ease-out; }
+  /* 进度线：scaleX 零重排 + 等待态克制微光 */
+  .bar {
+    position: relative; flex: none; height: 2px; margin-top: 18px;
+    background: var(--rule-2); border-radius: 1px; overflow: hidden;
+  }
+  .bar-fill {
+    position: absolute; inset: 0; width: 100%;
+    transform-origin: left center; transform: scaleX(0);
+    background: var(--accent);
+    transition: transform var(--dur-normal) var(--ease-out),
+                background-color var(--dur-normal) var(--ease-out);
+  }
+  .bar.indeterminate::after {
+    content: ''; position: absolute; inset: 0; width: 32%;
+    background: linear-gradient(90deg, transparent, var(--accent), transparent);
+    opacity: .65; animation: barGlide 1.35s var(--ease-out) infinite;
+  }
+  @keyframes barGlide {
+    0% { transform: translateX(-120%); }
+    100% { transform: translateX(420%); }
+  }
+  .bar.is-done .bar-fill { background: var(--good); }
+  .bar.is-stop .bar-fill { background: var(--ink-3); }
+  .bar.is-err .bar-fill { background: var(--bad); }
 
-  /* 汇总：一行读数，竖线分隔 */
-  .stats { flex: none; display: flex; flex-wrap: wrap; row-gap: 12px; margin-top: 20px; }
+  /* 汇总：一行读数，竖线分隔（复用 DOM，避免整块重建闪跳） */
+  .stats {
+    flex: none; display: flex; flex-wrap: wrap; row-gap: 12px; margin-top: 20px;
+    transition: opacity var(--dur-normal) var(--ease-out), transform var(--dur-normal) var(--ease-out);
+  }
+  .stats[hidden] { display: none; }
+  .stats.entering { animation: fadeSlideUp var(--dur-normal) var(--ease-out); }
+  @keyframes fadeSlideUp {
+    from { opacity: 0; transform: translate3d(0, 6px, 0); }
+    to { opacity: 1; transform: translate3d(0, 0, 0); }
+  }
+  @keyframes fadeIn {
+    from { opacity: 0; }
+    to { opacity: 1; }
+  }
   .stat { padding: 0 26px; border-left: 1px solid var(--rule); }
   .stat:first-child { padding-left: 0; border-left: 0; }
   .stat-num {
     font-family: var(--num); font-size: 26px; font-weight: 600; line-height: 1.1;
     font-variant-numeric: tabular-nums; letter-spacing: -.2px;
+    transition: color var(--dur-fast) var(--ease-out);
   }
   .stat-num small { font-size: 13px; font-weight: 500; color: var(--ink-3); margin-left: 3px; letter-spacing: 0; }
   .stat-num.good { color: var(--good); }
@@ -201,34 +337,56 @@
   .filter-box {
     background: var(--field); border: 1px solid var(--rule); border-radius: 8px;
     padding: 0 12px; height: 34px; font-size: 13px; width: 240px; outline: none;
-    transition: border-color .15s, box-shadow .15s;
+    transition: border-color var(--dur-fast) var(--ease-out), box-shadow var(--dur-fast) var(--ease-out);
   }
   .filter-box::placeholder { color: var(--ink-3); }
   .filter-box:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
 
-  /* 提示浮层：订阅流量、带宽基线、警告等收在这里，按钮颜色取最严重的一级 */
+  /* 提示浮层：从按钮右上角展开/收起，支持中途打断 */
   .pop { position: relative; flex: none; }
-  .pop > summary { list-style: none; }
-  .pop > summary::-webkit-details-marker { display: none; }
+  .pop[hidden] { display: none; }
   .pop-btn {
     display: inline-flex; align-items: center; gap: 6px; height: 34px; padding: 0 12px;
-    border: 1px solid var(--rule); border-radius: 8px; color: var(--ink-2);
+    background: transparent; border: 1px solid var(--rule); border-radius: 8px; color: var(--ink-2);
     font-size: 13px; cursor: pointer; white-space: nowrap; user-select: none;
-    transition: border-color .15s, color .15s;
+    transition: border-color var(--dur-fast) var(--ease-out),
+                color var(--dur-fast) var(--ease-out),
+                transform var(--dur-instant) var(--ease-spring);
   }
-  .pop-btn:hover, .pop[open] > .pop-btn { border-color: var(--accent); color: var(--ink); }
-  .pop-btn b { font-family: var(--num); font-weight: 600; }
+  .pop-btn:active { transform: scale(.97); }
+  .pop.open > .pop-btn { border-color: var(--accent); color: var(--ink); }
+  .pop-btn b { display: inline-block; font-family: var(--num); font-weight: 600; }
+  .pop-btn b.bump { animation: countBump 220ms var(--ease-spring); }
+  @keyframes countBump {
+    0% { transform: scale(1); }
+    40% { transform: scale(1.24); }
+    100% { transform: scale(1); }
+  }
   .pop-btn.warn { color: var(--mid); border-color: color-mix(in srgb, var(--mid) 45%, transparent); }
   .pop-btn.err { color: var(--bad); border-color: color-mix(in srgb, var(--bad) 45%, transparent); }
   .pop-panel {
     position: absolute; top: calc(100% + 6px); right: 0; z-index: 30;
     background: var(--bg); border: 1px solid var(--rule); border-radius: 10px;
-    box-shadow: 0 10px 30px rgba(0, 0, 0, .14); padding: 12px;
+    box-shadow: var(--pop-shadow); padding: 12px;
+    transform-origin: top right;
+    opacity: 0; transform: translate3d(0, -4px, 0) scale(.96);
+    visibility: hidden; pointer-events: none;
+    transition: opacity var(--dur-fast) var(--ease-in),
+                transform var(--dur-fast) var(--ease-in),
+                visibility 0s linear var(--dur-fast);
+  }
+  .pop.open .pop-panel {
+    opacity: 1; transform: translate3d(0, 0, 0) scale(1);
+    visibility: visible; pointer-events: auto;
+    transition: opacity var(--dur-normal) var(--ease-spring),
+                transform var(--dur-normal) var(--ease-spring),
+                visibility 0s linear 0s;
   }
   .notes { display: flex; flex-direction: column; gap: 6px; width: min(440px, calc(100vw - 32px)); max-height: 50vh; overflow: auto; }
   .chip {
     font-size: 12.5px; padding: 5px 10px; border-radius: 6px; line-height: 1.45;
     border: 1px solid var(--rule); color: var(--ink-2); white-space: pre-wrap; word-break: break-word;
+    animation: fadeSlideUp var(--dur-fast) var(--ease-out);
   }
   .chip.warn { color: var(--mid); border-color: color-mix(in srgb, var(--mid) 35%, transparent); }
   .chip.err  { color: var(--bad); border-color: color-mix(in srgb, var(--bad) 35%, transparent); }
@@ -243,11 +401,31 @@
     background: var(--bg); position: sticky; top: 0; z-index: 2;
     /* 合并边框模式下 sticky 单元格的 border 会随内容滚走，用内阴影画底线 */
     box-shadow: inset 0 -1px 0 var(--rule);
+    transition: color var(--dur-fast) var(--ease-out), box-shadow var(--dur-fast) var(--ease-out);
   }
-  thead th:hover { color: var(--ink); }
-  th .arrow { font-size: 9px; margin-left: 4px; color: var(--accent); vertical-align: 1px; }
-  tbody td { padding: 9px 12px; border-bottom: 1px solid var(--rule-2); vertical-align: middle; }
-  tbody tr:hover td { background: var(--hover); }
+  .table-panel.scrolled thead th {
+    box-shadow: inset 0 -1px 0 var(--rule), var(--scroll-shadow);
+  }
+  thead th:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+  th .sort-arrow {
+    display: inline-block; width: 10px; height: 10px; margin-left: 4px;
+    vertical-align: -1px; color: var(--accent);
+    opacity: 0; transform: scale(.75);
+    transition: opacity var(--dur-fast) var(--ease-out), transform var(--dur-fast) var(--ease-spring);
+  }
+  th[aria-sort="ascending"] .sort-arrow { opacity: 1; transform: rotate(0deg) scale(1); }
+  th[aria-sort="descending"] .sort-arrow { opacity: 1; transform: rotate(180deg) scale(1); }
+  th[aria-sort="ascending"], th[aria-sort="descending"] { color: var(--ink); }
+
+  tbody td {
+    padding: 9px 12px; border-bottom: 1px solid var(--rule-2); vertical-align: middle;
+    transition: background-color var(--dur-fast) var(--ease-out), color var(--dur-fast) var(--ease-out);
+  }
+  tbody tr.row-enter { animation: rowEnter var(--dur-normal) var(--ease-out) backwards; }
+  @keyframes rowEnter {
+    from { opacity: 0; transform: translate3d(0, 5px, 0); }
+    to { opacity: 1; transform: translate3d(0, 0, 0); }
+  }
   tr.pending td { color: var(--ink-3); }
   tr.node-failed td { color: var(--ink-3); }
   tr.node-failed td.name { color: var(--ink-2); text-decoration: line-through; text-decoration-color: var(--rule); }
@@ -256,6 +434,7 @@
   tr.testing-node { position: relative; z-index: 1; }
   tr.testing-node td { background: linear-gradient(var(--accent-soft), var(--accent-soft)), var(--bg); }
   tr.testing-node td:first-child { box-shadow: inset 3px 0 0 var(--accent); }
+  tr td:first-child { transition: box-shadow var(--dur-fast) var(--ease-out), background-color var(--dur-fast) var(--ease-out); }
 
   .num { font-variant-numeric: tabular-nums; }
   .dim { color: var(--ink-3); }
@@ -277,7 +456,7 @@
   .lat small { font-family: var(--sans); font-size: 11px; font-weight: 400; color: var(--ink-3); margin-left: 2px; }
   .t-good { color: var(--good); } .t-mid { color: var(--mid); } .t-bad { color: var(--bad); }
 
-  /* 速度：数值 + 按全场最快值归一化的横条（本页的主视觉） */
+  /* 速度：数值 + 按全场最快值归一化的横条（scaleX 零重排，父级裁剪圆角） */
   .speed-cell { min-width: 240px; }
   /* 只测延迟时速度列只有「-」，不需要给速度条留宽度 */
   #tbl.no-speed .speed-cell { min-width: 0; }
@@ -285,18 +464,21 @@
   .spd-num {
     font-family: var(--num); font-size: 15px; font-weight: 600; text-align: right;
     font-variant-numeric: tabular-nums; color: var(--ink);
+    transition: color var(--dur-fast) var(--ease-out);
   }
   .spd-track { position: relative; height: 8px; background: var(--track); border-radius: 2px; overflow: hidden; }
   .spd-track i {
-    position: absolute; inset: 0 auto 0 0; border-radius: 2px;
-    width: min(100%, calc(var(--v) / var(--max) * 100%));
-    background: var(--ink-3); transition: width .35s ease-out;
+    position: absolute; inset: 0; width: 100%;
+    transform-origin: left center;
+    transform: scaleX(clamp(0, calc(var(--v) / var(--max)), 1));
+    background: var(--ink-3);
+    transition: transform var(--dur-normal) var(--ease-out), background-color var(--dur-normal) var(--ease-out);
   }
   .spd.t-good .spd-track i { background: var(--good); }
   .spd.t-mid .spd-track i { background: var(--mid); }
   .spd.t-bad .spd-track i { background: var(--bad); }
   .spd.live .spd-num { color: var(--accent); }
-  .spd.live .spd-track i { background: var(--accent); transition-duration: .2s; }
+  .spd.live .spd-track i { background: var(--accent); transition-duration: 180ms; }
   .spd-meta { grid-column: 2; font-size: 11px; color: var(--ink-3); line-height: 1.2; margin-top: 3px; }
 
   /* 状态：圆点 + 文字 */
@@ -306,14 +488,21 @@
   .st-bad { color: var(--bad); }
   .st-wait { color: var(--ink-3); }
   .st-wait::before { background: transparent; border: 1px solid currentColor; }
+  .st-stop { color: var(--ink-3); }
   .st-run { color: var(--accent); font-weight: 500; }
   .st-run::before { display: none; }
 
   .error { color: var(--bad); font-size: 12px; max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   tr.node-failed td .error { color: var(--ink-3); margin-top: 1px; line-height: 1.3; cursor: help; }
   .spd-fail { color: var(--mid); font-size: 12.5px; cursor: help; }
-  .empty { text-align: center; color: var(--ink-3); padding: 34px 16px; font-size: 13.5px; white-space: pre-wrap; }
+  .empty { text-align: center; color: var(--ink-3); padding: 34px 16px; font-size: 13.5px; white-space: pre-wrap; animation: fadeIn var(--dur-fast) var(--ease-out); }
   .empty.err { color: var(--bad); }
+  .filter-empty {
+    display: flex; flex-direction: column; align-items: center; gap: 10px;
+    padding: 40px 16px; color: var(--ink-3); font-size: 13.5px;
+    animation: fadeIn var(--dur-fast) var(--ease-out);
+  }
+  .filter-empty[hidden] { display: none; }
   .spin {
     display: inline-block; width: 11px; height: 11px; border: 1.5px solid var(--rule);
     border-top-color: var(--accent); border-radius: 50%; animation: r .7s linear infinite;
@@ -325,21 +514,61 @@
   .icon-badge {
     display: inline-flex; align-items: center; justify-content: center; padding: 2px;
     border-radius: 5px; background: #fff; box-shadow: 0 0 0 1px var(--rule-2);
-    cursor: default; transition: transform .12s ease;
+    cursor: default;
+    transition: transform var(--dur-fast) var(--ease-spring), box-shadow var(--dur-fast) var(--ease-out);
   }
-  .icon-badge:hover { transform: scale(1.18); z-index: 10; }
   .icon-badge img { display: block; width: 16px; height: 16px; object-fit: contain; }
 
-  /* 悬停提示 */
+  /* 悬停提示：延迟 180ms 进入防扫过乱闪，离开 0ms 立即淡出 */
   [data-tip] { position: relative; cursor: default; }
   [data-tip]::after {
     content: attr(data-tip); position: absolute; bottom: calc(100% + 6px); left: 50%;
-    transform: translateX(-50%) translateY(2px); background: var(--tip-bg); color: var(--tip-ink);
+    transform: translateX(-50%) translateY(3px) scale(.96);
+    background: var(--tip-bg); color: var(--tip-ink);
     padding: 4px 8px; border-radius: 5px; font: 500 11.5px/1.35 var(--sans);
     white-space: nowrap; pointer-events: none; opacity: 0; visibility: hidden;
-    transition: opacity .08s ease, transform .08s ease; z-index: 9999;
+    transition: opacity var(--dur-instant) var(--ease-in) 0ms,
+                transform var(--dur-instant) var(--ease-in) 0ms,
+                visibility 0s linear var(--dur-instant);
+    z-index: 9999;
   }
-  [data-tip]:hover::after { opacity: 1; visibility: visible; transform: translateX(-50%) translateY(0); }
+  /* 表格首行贴近 sticky 表头，Tooltip 向下弹出避免被遮挡 */
+  tbody tr:first-child [data-tip]::after {
+    bottom: auto; top: calc(100% + 6px);
+    transform: translateX(-50%) translateY(-3px) scale(.96);
+  }
+
+  /* 仅在支持精细悬停的设备上启用悬停交互，防止触屏粘滞 */
+  @media (hover: hover) {
+    .btn:hover:not(:disabled) { filter: brightness(1.07); }
+    .btn.ghost:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); filter: none; }
+    .btn.ghost.done:hover:not(:disabled) { border-color: var(--good); color: var(--good); }
+    .seg label:hover span { color: var(--ink); }
+    .check:hover { color: var(--ink); }
+    .recent-item:hover { background: var(--hover); }
+    .recent-del:hover { color: var(--bad); background: var(--hover); }
+    .back:hover { border-color: var(--accent); color: var(--accent); }
+    .back:hover svg { transform: translateX(-2px); }
+    .pop-btn:hover { border-color: var(--accent); color: var(--ink); }
+    thead th:hover { color: var(--ink); }
+    tbody tr:hover td { background: var(--hover); }
+    tbody tr.testing-node:hover td { background: linear-gradient(var(--accent-soft), var(--accent-soft)), var(--bg); }
+    .icon-badge:hover {
+      transform: translateY(-1px) scale(1.12); z-index: 10;
+      box-shadow: 0 2px 6px rgba(0, 0, 0, .14), 0 0 0 1px var(--rule);
+    }
+    .platform .icon-badge:hover { transform: none; box-shadow: 0 0 0 1px var(--rule-2); }
+    [data-tip]:hover::after {
+      opacity: 1; visibility: visible;
+      transform: translateX(-50%) translateY(0) scale(1);
+      transition: opacity var(--dur-fast) var(--ease-out) 180ms,
+                  transform var(--dur-fast) var(--ease-spring) 180ms,
+                  visibility 0s linear 180ms;
+    }
+    tbody tr:first-child [data-tip]:hover::after {
+      transform: translateX(-50%) translateY(0) scale(1);
+    }
+  }
 
   @media (max-width: 900px) {
     .intro { grid-template-columns: 1fr; gap: 32px; }
@@ -353,11 +582,38 @@
     .res-title h1 { font-size: 17px; }
     .stat { padding: 0 14px; }
     .stat-num { font-size: 20px; }
-    .tools { width: 100%; }
-    .filter-box { flex: 1; width: auto; min-width: 0; }
+    .tools { position: relative; width: 100%; flex-wrap: wrap; }
+    .filter-box { flex: 1 1 160px; width: auto; min-width: 0; }
+    .pop { position: static; }
+    .pop-panel { left: 0; right: 0; transform-origin: top center; transform: translate3d(0, -4px, 0) scale(.96); }
+    .pop.open .pop-panel { transform: translate3d(0, 0, 0) scale(1); }
+    .notes { width: 100%; }
   }
   @media (prefers-reduced-motion: reduce) {
-    *, *::before, *::after { transition: none !important; animation-duration: 1.5s !important; }
+    :root {
+      --dur-instant: 0.01ms;
+      --dur-fast: 0.01ms;
+      --dur-normal: 0.01ms;
+      --dur-slow: 0.01ms;
+    }
+    .view, .pop-panel, .seg-thumb, .spd-track i, .bar-fill, .icon-badge, .btn, .back, .recent-item {
+      transition: opacity 80ms linear !important;
+    }
+    body[data-view="home"] #results,
+    body[data-view="results"] #home { transform: none !important; }
+    .row-enter, .stats.entering, .chip, #src.shake, .pop-btn b.bump { animation: none !important; }
+    .spin {
+      animation: pulseDim 1.6s ease-in-out infinite !important;
+      border-color: var(--accent); background: var(--accent); width: 7px; height: 7px;
+    }
+    .bar.indeterminate::after {
+      width: 100%; animation: pulseDim 1.8s ease-in-out infinite !important;
+      background: var(--accent);
+    }
+    @keyframes pulseDim {
+      0%, 100% { opacity: .25; }
+      50% { opacity: .75; }
+    }
   }
 
   /* ---------- 首页补充：结果预览、测试流程、解锁平台、支持格式 ---------- */
@@ -387,22 +643,18 @@
   .platforms { display: flex; flex-wrap: wrap; gap: 8px 14px; }
   .platform { display: inline-flex; align-items: center; gap: 7px; font-size: 12.5px; color: var(--ink-2); }
   .platform .icon-badge { cursor: default; }
-  .platform .icon-badge:hover { transform: none; }
 
   .tags { display: flex; flex-wrap: wrap; gap: 6px; }
   .tag {
     font-size: 12.5px; padding: 2px 9px; border-radius: 6px;
     border: 1px solid var(--rule); color: var(--ink-2);
   }
-
-  /* 结果页盖住首页时的入场过渡 */
-  body[data-view="results"] #results { animation: cover .22s ease-out; }
-  @keyframes cover { from { opacity: 0; transform: translateY(8px); } }
 </style>
 </head>
 <body data-view="home">
 <div class="app">
-  <!-- 首页：输入、选项与引导；开始测速后由结果页整块盖住 -->
+  <div class="views">
+  <!-- 首页：输入、选项与引导；开始测速后平滑切换到结果页 -->
   <section class="view" id="home">
     <header class="home-head">
       <h1>节点测速</h1>
@@ -518,7 +770,7 @@
   </section>
 
   <!-- 结果页：测速开始后覆盖首页，表格占满剩余高度 -->
-  <section class="view" id="results">
+  <section class="view" id="results" inert>
     <header class="res-head">
       <button class="back" id="backBtn" title="返回首页">
         <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10 3 5 8l5 5"/></svg>
@@ -531,9 +783,9 @@
       <button class="btn" id="runBtn">停止</button>
     </header>
 
-    <div class="bar"><div class="bar-fill" id="barFill"></div></div>
+    <div class="bar" id="bar"><div class="bar-fill" id="barFill"></div></div>
 
-    <div class="stats" id="stats"></div>
+    <div class="stats" id="stats" hidden></div>
 
     <div class="toolbar">
       <div class="progress-info">
@@ -542,12 +794,12 @@
       </div>
       <div class="tools">
         <input id="filterInput" class="filter-box" type="search" aria-label="筛选节点" placeholder="筛选节点、落地、IP 类型、解锁平台">
-        <details class="pop" id="notesPop" hidden>
-          <summary class="pop-btn" id="notesBtn">提示 <b id="notesCount">0</b></summary>
-          <div class="pop-panel"><div class="notes" id="chips"></div></div>
-        </details>
+        <div class="pop" id="notesPop" hidden>
+          <button type="button" class="pop-btn" id="notesBtn" aria-expanded="false" aria-controls="notesPanel">提示 <b id="notesCount">0</b></button>
+          <div class="pop-panel" id="notesPanel" role="region" aria-label="提示信息"><div class="notes" id="chips"></div></div>
+        </div>
         <button class="btn ghost" id="exportNodesBtn" disabled onclick="exportNodes()">导出可用节点</button>
-        <button class="btn ghost" id="pngBtn" disabled onclick="exportPNG().catch(e => chip('导出失败: ' + e.message, 'err'))">导出图片</button>
+        <button class="btn ghost" id="pngBtn" disabled onclick="handleExportPNG()">导出图片</button>
       </div>
     </div>
 
@@ -557,8 +809,13 @@
         <tbody id="tbody"></tbody>
       </table>
       <div class="empty" id="empty"></div>
+      <div class="filter-empty" id="filterEmpty" hidden>
+        <span>没有匹配的节点</span>
+        <button type="button" class="btn ghost" id="clearFilterBtn">清除筛选</button>
+      </div>
     </div>
   </section>
+  </div>
 </div>
 
 <script>
@@ -639,14 +896,23 @@ function effBaseline() {
 // 提示收进状态栏的「提示」浮层，按钮颜色取最严重的一级，不占列表空间
 const NOTE_LEVEL = { err: 2, warn: 1 };
 let noteLevel = 0;
+function setNotesOpen(open) {
+  const pop = $('notesPop');
+  pop.classList.toggle('open', open);
+  $('notesBtn').setAttribute('aria-expanded', String(open));
+}
 function chip(text, cls) {
   const el = document.createElement('div');
   el.className = 'chip' + (cls ? ' ' + cls : '');
   el.textContent = text;
   $('chips').appendChild(el);
   noteLevel = Math.max(noteLevel, NOTE_LEVEL[cls] || 0);
-  $('notesCount').textContent = $('chips').children.length;
-  $('notesBtn').className = 'pop-btn sm' + (noteLevel === 2 ? ' err' : noteLevel === 1 ? ' warn' : '');
+  const countEl = $('notesCount');
+  countEl.textContent = $('chips').children.length;
+  countEl.classList.remove('bump');
+  void countEl.offsetWidth;
+  countEl.classList.add('bump');
+  $('notesBtn').className = 'pop-btn' + (noteLevel === 2 ? ' err' : noteLevel === 1 ? ' warn' : '');
   $('notesPop').hidden = false;
   // 还没有节点行时（订阅读取失败等），错误直接显示在列表区，免得要点开浮层才看到
   if (cls === 'err' && !order.length) {
@@ -658,8 +924,8 @@ function chip(text, cls) {
 function clearNotes() {
   $('chips').innerHTML = '';
   noteLevel = 0;
+  setNotesOpen(false);
   $('notesPop').hidden = true;
-  $('notesPop').open = false;
 }
 /* ---------- 最近测过的订阅（仅存本浏览器 localStorage） ---------- */
 const RECENT_KEY = 'nt-recent-subs';
@@ -715,36 +981,58 @@ function markRecentSelected() {
 }
 $('src').addEventListener('input', markRecentSelected);
 
+let recentRenderTimer = null;
 function renderRecent() {
+  clearTimeout(recentRenderTimer);
+  recentRenderTimer = null;
   const list = loadRecent();
   if (!list.length) {
     $('recent').innerHTML = '<h2>最近测过</h2><p class="recent-none">还没有测过的订阅。粘贴订阅链接，回车开始。</p>';
     return;
   }
-  $('recent').innerHTML = '<h2>最近测过</h2><div class="recent-list">' + list.map((x, i) =>
-    `<div class="recent-item${x.src === $('src').value.trim() ? ' selected' : ''}">` +
-      `<button class="recent-fill" data-i="${i}" title="填入输入框">` +
+  $('recent').innerHTML = '<h2>最近测过</h2><div class="recent-list">' + list.map(x =>
+    `<div class="recent-item${x.src === $('src').value.trim() ? ' selected' : ''}" data-src="${esc(x.src)}">` +
+      `<button class="recent-fill" title="填入输入框">` +
         `<span class="recent-src">${esc(maskSrc(x.src))}</span>` +
         `<span class="recent-meta">${x.count != null ? x.count + ' 个节点，' : ''}${fmtAgo(x.t)}</span>` +
       `</button>` +
       `<span class="recent-ok">${x.ok != null ? x.ok + ' 可用' : ''}</span>` +
-      `<button class="recent-del" data-i="${i}" aria-label="删除这条记录" title="删除这条记录">×</button>` +
+      `<button class="recent-del" aria-label="删除这条记录" title="删除这条记录">×</button>` +
     `</div>`).join('') + '</div>';
 }
 $('recent').addEventListener('click', e => {
-  const btn = e.target.closest('button[data-i]');
+  const btn = e.target.closest('.recent-fill, .recent-del');
   if (!btn) return;
+  const rowEl = btn.closest('.recent-item');
+  if (!rowEl || rowEl.classList.contains('removing')) return;
+  const src = rowEl.dataset.src;
   const list = loadRecent();
-  const item = list[+btn.dataset.i];
+  const item = list.find(x => x.src === src);
   if (!item) return;
   if (btn.classList.contains('recent-del')) {
-    storeRecent(list.filter(x => x !== item));
-    renderRecent();
+    const nextList = list.filter(x => x.src !== src);
+    storeRecent(nextList);
+    if (!isReducedMotion()) {
+      rowEl.style.maxHeight = rowEl.offsetHeight + 'px';
+      void rowEl.offsetHeight;
+      rowEl.classList.add('removing');
+      rowEl.style.maxHeight = '0';
+      clearTimeout(recentRenderTimer);
+      recentRenderTimer = setTimeout(renderRecent, 240);
+    } else {
+      renderRecent();
+    }
   } else {
     // 只填入，不直接开测：用户可能想先确认订阅或调整选项
-    $('src').value = item.src;
+    const input = $('src');
+    input.value = item.src;
     markRecentSelected();
-    $('src').focus();
+    input.focus({ preventScroll: true });
+    input.classList.remove('flash');
+    void input.offsetWidth;
+    input.classList.add('flash');
+    clearTimeout(input._flashTimer);
+    input._flashTimer = setTimeout(() => input.classList.remove('flash'), 320);
   }
 });
 
@@ -763,31 +1051,53 @@ function setProgress(done_, total, ok) {
   const okTotal = order.filter(n => rows[n].ok).length;
   // 以后端的 _speed_tested 为准：测速失败（speed_mbps 为空）的节点也算测完，否则进度永远到不了 100%
   const speedDone = order.filter(n => rows[n].ok && (rows[n]._speed_tested || rows[n].speed_mbps != null)).length;
+  const setBar = pct => {
+    $('barFill').style.transform = `scaleX(${Math.max(0, Math.min(1, pct / 100))})`;
+    const bar = $('bar');
+    if (bar && pct > 0) bar.classList.remove('indeterminate');
+  };
 
   if (isNoSpeed) {
     const pct = total ? (probeDone / total) * 100 : 0;
-    $('barFill').style.width = pct + '%';
+    setBar(pct);
     $('progressCount').textContent = `延迟 ${probeDone}/${total}，可用 ${okTotal}`;
     if (probeDone >= total && total > 0) $('progressText').textContent = '测试完成';
   } else {
     // 测速模式：优先反映可用节点的下载测速完成比例
     if (probeDone >= total && total > 0 && okTotal === 0) {
-      $('barFill').style.width = '100%';
+      setBar(100);
       $('progressCount').textContent = `探活 ${total}/${total}，无可用节点`;
       $('progressText').textContent = '全部节点不可用';
     } else if (okTotal > 0) {
       const pct = (speedDone / okTotal) * 100;
-      $('barFill').style.width = pct + '%';
+      setBar(pct);
       $('progressCount').textContent = `测速 ${speedDone}/${okTotal}　探活 ${probeDone}/${total}`;
       if (speedDone >= okTotal && probeDone >= total) {
         $('progressText').textContent = '测速全部完成';
       }
     } else {
       const pct = total ? Math.min((probeDone / total) * 15, 15) : 0;
-      $('barFill').style.width = pct + '%';
+      setBar(pct);
       $('progressCount').textContent = `探活 ${probeDone}/${total}`;
     }
   }
+}
+
+let statEls = null;
+function ensureStatsDOM() {
+  if (statEls) return statEls;
+  const labels = ['节点', '可用', '失败', '最快', '最低延迟', '耗时'];
+  const wrap = $('stats');
+  wrap.innerHTML = labels.map(k =>
+    `<div class="stat"><div class="stat-num"><span class="stat-val">-</span><small class="stat-unit"></small></div>` +
+    `<div class="stat-label">${k}</div></div>`
+  ).join('');
+  statEls = [...wrap.querySelectorAll('.stat')].map(el => ({
+    num: el.querySelector('.stat-num'),
+    val: el.querySelector('.stat-val'),
+    unit: el.querySelector('.stat-unit'),
+  }));
+  return statEls;
 }
 
 function updateStats() {
@@ -800,17 +1110,35 @@ function updateStats() {
   $('tbl').style.setProperty('--max', maxSpeed || 1);
   const failed = doneList.length - ok.length;
   const cards = [
-    ['节点', String(order.length), '', ''],
-    ['可用', String(ok.length), '', 'good'],
-    ['失败', String(failed), '', failed ? 'bad' : ''],
-    ['最快', speeds.length ? maxSpeed.toFixed(1) : '-', speeds.length ? 'Mbps' : '', ''],
-    ['最低延迟', lats.length ? Math.min(...lats).toFixed(0) : '-', lats.length ? 'ms' : '', ''],
-    ['耗时', testElapsed || '测试中', '', ''],
+    [String(order.length), '', ''],
+    [String(ok.length), '', 'good'],
+    [String(failed), '', failed ? 'bad' : ''],
+    [speeds.length ? maxSpeed.toFixed(1) : '-', speeds.length ? 'Mbps' : '', ''],
+    [lats.length ? Math.min(...lats).toFixed(0) : '-', lats.length ? 'ms' : '', ''],
+    [testElapsed || '测试中', '', ''],
   ];
-  $('stats').style.display = order.length ? 'flex' : 'none';
-  $('stats').innerHTML = cards.map(([k, v, unit, c]) =>
-    `<div class="stat"><div class="stat-num ${c}">${esc(v)}${unit ? `<small>${unit}</small>` : ''}</div>` +
-    `<div class="stat-label">${k}</div></div>`).join('');
+  const wrap = $('stats');
+  if (!order.length) {
+    wrap.hidden = true;
+    wrap.classList.remove('entering');
+    return;
+  }
+  const wasHidden = wrap.hidden;
+  const els = ensureStatsDOM();
+  cards.forEach(([v, unit, c], i) => {
+    const s = els[i];
+    if (s.val.textContent !== v) s.val.textContent = v;
+    if (s.unit.textContent !== unit) s.unit.textContent = unit;
+    s.unit.hidden = !unit;
+    const cls = c ? 'stat-num ' + c : 'stat-num';
+    if (s.num.className !== cls) s.num.className = cls;
+  });
+  if (wasHidden) {
+    wrap.hidden = false;
+    wrap.classList.remove('entering');
+    void wrap.offsetWidth;
+    wrap.classList.add('entering');
+  }
 }
 
 function speedBar(v, cls, meta) {
@@ -818,42 +1146,57 @@ function speedBar(v, cls, meta) {
     `<span class="spd-track"><i></i></span>${meta || ''}</div>`;
 }
 
-function render(r) {
+function baselineMetaText(bw) {
+  return `与本机带宽（${bw.toFixed(1)} Mbps）接近：瓶颈大概率在本机，而非节点差异。可把「同时测速」调到 2 或 4 区分真实快慢`;
+}
+
+// 仅增量更新单行的速度单元格：复用已有 .spd DOM，避免测速完成时进度条闪烁回 0
+function syncSpeedCell(cell, r, bw) {
   const speed = r.speed_mbps;
+  if (speed != null) {
+    const cls = 'spd t-' + speedTier(speed);
+    const nearLocal = !!(bw && speed >= bw * 0.93);
+    let spd = cell.querySelector('.spd');
+    if (spd) {
+      spd.className = cls;
+      spd.style.setProperty('--v', speed);
+      const numEl = spd.querySelector('.spd-num');
+      if (numEl) numEl.textContent = speed.toFixed(1);
+      let metaEl = spd.querySelector('.spd-meta');
+      if (nearLocal) {
+        if (!metaEl) {
+          metaEl = document.createElement('span');
+          metaEl.className = 'spd-meta';
+          metaEl.textContent = '≈ 本机带宽上限';
+          spd.appendChild(metaEl);
+        }
+        metaEl.title = baselineMetaText(bw);
+      } else if (metaEl) {
+        metaEl.remove();
+      }
+    } else {
+      cell.classList.remove('dim');
+      cell.innerHTML = speedBar(speed, 't-' + speedTier(speed), nearLocal
+        ? `<span class="spd-meta" title="${esc(baselineMetaText(bw))}">≈ 本机带宽上限</span>`
+        : '');
+    }
+  } else if (r.ok && r.error) {
+    cell.classList.remove('dim');
+    cell.innerHTML = `<span class="spd-fail" title="${esc(r.error)}">${esc(errBrief(r.error))}</span>`;
+  } else {
+    cell.innerHTML = '<span class="dim">-</span>';
+  }
+}
+
+// 测速全部结束后，按最终本机带宽基线仅增量刷新「≈ 本机带宽上限」标记，避免整表重建闪断
+function refreshBaselineMeta() {
   const bw = effBaseline();
-  const nearLocal = bw && speed != null && speed >= bw * 0.93;
-  const speedCell = speed != null
-    ? speedBar(speed, 't-' + speedTier(speed), nearLocal
-        ? `<span class="spd-meta" title="与本机带宽（${bw.toFixed(1)} Mbps）接近：瓶颈大概率在本机，而非节点差异。可把「同时测速」调到 2 或 4 区分真实快慢">≈ 本机带宽上限</span>`
-        : '')
-    // 可用节点带 error 只可能是测速阶段失败，与「没测速」区分开
-    : (r.ok && r.error)
-      ? `<span class="spd-fail" title="${esc(r.error)}">${esc(errBrief(r.error))}</span>`
-      : '<span class="dim">-</span>';
-
-  const latVal = r.http_ms != null ? r.http_ms : r.tcp_ms;
-  const httpStr = r.http_ms != null ? `HTTP ${r.http_ms.toFixed(0)} ms` : '';
-  const tcpStr = r.tcp_ms != null ? `TCP ${r.tcp_ms.toFixed(0)} ms` : '';
-  const latTip = (httpStr && tcpStr) ? `${httpStr}，${tcpStr}` : (httpStr || tcpStr);
-  const latCell = latVal != null
-    ? `<span class="lat t-${latTier(latVal)}" ${latTip ? `data-tip="${esc(latTip)}"` : ''}>${latVal.toFixed(0)}<small>ms</small></span>`
-    : '<span class="dim">-</span>';
-
-  const st = classify(r);
-  const countryCell = r.country
-    ? `<span class="country">${esc(r.country)}</span>`
-    : '<span class="dim">-</span>';
-  return `<td class="num rank"></td>` +
-    `<td class="name"><div class="name-txt" title="${esc(r.name)}">${esc(r.name)}</div></td>` +
-    `<td class="type">${esc(r.type || '?')}</td>` +
-    `<td>${countryCell}</td>` +
-    `<td data-risk="${r.ip_quality && r.ip_quality.risk in IP_RISK ? IP_RISK[r.ip_quality.risk] : ''}">${renderIp(r.ip_quality)}</td>` +
-    `<td>${renderUnlock(r.unlock)}</td>` +
-    `<td class="num latency-cell">${latCell}</td>` +
-    `<td class="num speed-cell">${speedCell}</td>` +
-    `<td><span class="st ${st.cls}">${st.text}</span>` +
-      (!r.ok && r.error ? `<div class="error" title="${esc(r.error)}">${esc(errBrief(r.error))}</div>` : '') +
-    `</td>`;
+  for (const name of order) {
+    const r = rows[name];
+    if (!r || !r._done || !r._tr || r.speed_mbps == null) continue;
+    const cell = r._tr.querySelector('.speed-cell');
+    if (cell) syncSpeedCell(cell, r, bw);
+  }
 }
 
 function updateRow(name, r) {
@@ -864,11 +1207,47 @@ function updateRow(name, r) {
   const tr = row._tr;
   tr.classList.remove('pending', 'testing-node');
   tr.classList.toggle('node-failed', !r.ok);
-  // 测试进行中不重排：每来一条结果就整表重排会让行上下乱跳（正在测的行也跟着跑），
-  // 序号保持原位，等 finishUI() 时统一排序
-  const rank = tr.cells[0] ? tr.cells[0].textContent : '';
-  tr.innerHTML = render(row);
-  tr.cells[0].textContent = rank;
+
+  // 增量更新变化单元格：保留序号、节点名、协议及已有速度条 DOM，消除重排与闪烁
+  const col = k => tr.querySelector(`[data-col="${k}"]`);
+  const countryCell = col('country');
+  if (countryCell) {
+    countryCell.className = '';
+    countryCell.innerHTML = row.country ? `<span class="country">${esc(row.country)}</span>` : '<span class="dim">-</span>';
+  }
+  const ipCell = col('ip');
+  if (ipCell) {
+    ipCell.className = '';
+    ipCell.dataset.risk = (row.ip_quality && row.ip_quality.risk in IP_RISK) ? String(IP_RISK[row.ip_quality.risk]) : '';
+    ipCell.innerHTML = renderIp(row.ip_quality);
+  }
+  const unlockCell = col('unlock');
+  if (unlockCell) {
+    unlockCell.className = '';
+    unlockCell.innerHTML = renderUnlock(row.unlock);
+  }
+  const latCell = col('latency');
+  if (latCell) {
+    const latVal = row.http_ms != null ? row.http_ms : row.tcp_ms;
+    const httpStr = row.http_ms != null ? `HTTP ${row.http_ms.toFixed(0)} ms` : '';
+    const tcpStr = row.tcp_ms != null ? `TCP ${row.tcp_ms.toFixed(0)} ms` : '';
+    const latTip = (httpStr && tcpStr) ? `${httpStr}，${tcpStr}` : (httpStr || tcpStr);
+    latCell.className = 'num latency-cell';
+    latCell.innerHTML = latVal != null
+      ? `<span class="lat t-${latTier(latVal)}" ${latTip ? `data-tip="${esc(latTip)}"` : ''}>${latVal.toFixed(0)}<small>ms</small></span>`
+      : '<span class="dim">-</span>';
+  }
+  const speedCell = col('speed');
+  if (speedCell) {
+    speedCell.className = 'num speed-cell';
+    syncSpeedCell(speedCell, row, effBaseline());
+  }
+  const stCell = col('status');
+  if (stCell) {
+    const st = classify(row);
+    stCell.innerHTML = `<span class="st ${st.cls}">${st.text}</span>` +
+      (!row.ok && row.error ? `<div class="error" title="${esc(row.error)}">${esc(errBrief(row.error))}</div>` : '');
+  }
 
   updateStats();
   if (order.some(n => rows[n]._done)) {
@@ -877,16 +1256,27 @@ function updateRow(name, r) {
   }
 }
 
-/* ---------- 行移动动画（FLIP） ---------- */
-// 先记下各行位置，再执行 DOM 移动，然后让每行从旧位置平滑滑到新位置。
-// 动画进行中再次移动时，getBoundingClientRect 拿到的是当前视觉位置，衔接不会跳。
-const reduceMotion = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-const FLIP_MS = 450;
+/* ---------- 减少动态效果动态监听与行移动动画（FLIP） ---------- */
+const mqReduce = window.matchMedia ? window.matchMedia('(prefers-reduced-motion: reduce)') : null;
+let reduceMotion = !!(mqReduce && mqReduce.matches);
+if (mqReduce && mqReduce.addEventListener) {
+  mqReduce.addEventListener('change', e => { reduceMotion = e.matches; });
+}
+const isReducedMotion = () => reduceMotion;
+const FLIP_MS = 300;
+const FLIP_MAX_ROWS = 40;
 
 function flipMove(mutate) {
   const tbody = $('tbody');
-  if (reduceMotion) { mutate(); return; }
+  if (isReducedMotion()) { mutate(); return; }
   const trs = [...tbody.rows].filter(tr => tr.style.display !== 'none');
+  for (const tr of trs) {
+    // 清理尚未结束或残留的入场动画，防止 DOM 移动时重播并覆盖 FLIP 位移
+    if (tr.classList.contains('row-enter')) {
+      tr.classList.remove('row-enter');
+      tr.style.animationDelay = '';
+    }
+  }
   const before = new Map(trs.map(tr => [tr, tr.getBoundingClientRect().top]));
   mutate();
   // 只给移动前后至少有一端在可视区里的行做动画，长列表里看不见的行直接就位
@@ -894,21 +1284,31 @@ function flipMove(mutate) {
   const visible = y => y > panel.top - 80 && y < panel.bottom + 80;
   const moved = [];
   for (const tr of trs) {
+    // 打断正在进行中的 FLIP 时先清理残留状态，防止位移极小时行卡在半路
+    clearTimeout(tr._flipTimer);
+    tr.style.transition = 'none';
+    tr.style.transform = '';
     const from = before.get(tr);
     const to = tr.getBoundingClientRect().top;
     const dy = from - to;
-    if (Math.abs(dy) < 1 || !(visible(from) || visible(to))) continue;
-    tr.style.transition = 'none';
-    tr.style.transform = `translateY(${dy}px)`;
-    moved.push(tr);
+    if (Math.abs(dy) < 1 || !(visible(from) || visible(to))) {
+      tr.style.transition = '';
+      continue;
+    }
+    moved.push([tr, dy]);
   }
-  if (!moved.length) return;
+  if (!moved.length || moved.length > FLIP_MAX_ROWS) {
+    for (const [tr] of moved) tr.style.transition = '';
+    return;
+  }
+  for (const [tr, dy] of moved) {
+    tr.style.transform = `translate3d(0, ${dy}px, 0)`;
+  }
   tbody.offsetHeight;  // 强制回流，让上面的起始位置先生效，下面的过渡才会播放
-  for (const tr of moved) {
-    tr.style.transition = `transform ${FLIP_MS}ms cubic-bezier(.2, .8, .2, 1)`;
+  for (const [tr] of moved) {
+    tr.style.transition = `transform ${FLIP_MS}ms cubic-bezier(0.22, 1, 0.36, 1)`;
     tr.style.transform = '';
-    clearTimeout(tr._flipTimer);
-    tr._flipTimer = setTimeout(() => { tr.style.transition = ''; }, FLIP_MS + 50);
+    tr._flipTimer = setTimeout(() => { tr.style.transition = ''; }, FLIP_MS + 40);
   }
 }
 
@@ -924,15 +1324,13 @@ function pinTestingRow(tr) {
 let sortState = { key: null, asc: true };
 
 function updateSortIndicators() {
-  document.querySelectorAll('#tbl thead th .arrow').forEach(a => a.remove());
-  if (!sortState.key) return;
-  const th = document.querySelector(`#tbl thead th[data-k="${sortState.key}"]`);
-  if (th) {
-    const arrow = document.createElement('span');
-    arrow.className = 'arrow';
-    arrow.textContent = sortState.asc ? '▲' : '▼';
-    th.appendChild(arrow);
-  }
+  document.querySelectorAll('#tbl thead th[data-k]').forEach(th => {
+    if (th.dataset.k === sortState.key) {
+      th.setAttribute('aria-sort', sortState.asc ? 'ascending' : 'descending');
+    } else {
+      th.setAttribute('aria-sort', 'none');
+    }
+  });
 }
 
 function applySort() {
@@ -996,10 +1394,18 @@ function handleSortClick(k) {
   flipMove(applySort);
 }
 
-// 使用事件委托，避免 start() 重置 thead 时监听器丢失
-$('tbl').querySelector('thead').addEventListener('click', e => {
+// 使用事件委托，避免 start() 重置 thead 时监听器丢失；同时支持键盘 Enter/Space 排序
+const tblHead = $('tbl').querySelector('thead');
+tblHead.addEventListener('click', e => {
   const th = e.target.closest('th');
   if (!th || !th.dataset.k) return;
+  handleSortClick(th.dataset.k);
+});
+tblHead.addEventListener('keydown', e => {
+  if (e.key !== 'Enter' && e.key !== ' ') return;
+  const th = e.target.closest('th');
+  if (!th || !th.dataset.k) return;
+  e.preventDefault();
   handleSortClick(th.dataset.k);
 });
 
@@ -1019,18 +1425,22 @@ function rankVal(r) {
   return 0;
 }
 
+const SORT_SVG = '<svg class="sort-arrow" viewBox="0 0 10 10" fill="currentColor" aria-hidden="true"><path d="M5 2.2 8.6 7.4H1.4Z"/></svg>';
 function renderHead() {
-  $('tbl').querySelector('thead tr').innerHTML = `
-    <th data-k="rank">#</th>
-    <th data-k="name">节点</th>
-    <th data-k="type">协议</th>
-    <th data-k="country">落地</th>
-    <th data-k="ip" title="出口 IP 类型与风险：家宽/移动风险低，机房中，机房且被标记为代理/VPN 高（AI 服务最容易风控）。悬停数值看 ISP / ASN">IP</th>
-    <th data-k="unlock">解锁</th>
-    <th data-k="latency" title="经节点的真实端到端延迟（悬停数值可看 TCP 直连入口延迟）">延迟</th>
-    <th data-k="speed">下载速度 (Mbps)</th>
-    <th data-k="status">状态</th>
-  `;
+  const cols = [
+    ['rank', '#', ''],
+    ['name', '节点', ''],
+    ['type', '协议', ''],
+    ['country', '落地', ''],
+    ['ip', 'IP', '出口 IP 类型与风险：家宽/移动风险低，机房中，机房且被标记为代理/VPN 高（AI 服务最容易风控）。悬停数值看 ISP / ASN'],
+    ['unlock', '解锁', ''],
+    ['latency', '延迟', '经节点的真实端到端延迟（悬停数值可看 TCP 直连入口延迟）'],
+    ['speed', '下载速度 (Mbps)', ''],
+    ['status', '状态', ''],
+  ];
+  $('tbl').querySelector('thead tr').innerHTML = cols.map(([k, label, title]) =>
+    `<th data-k="${k}" tabindex="0" aria-sort="none"${title ? ` title="${esc(title)}"` : ''}>${label}${SORT_SVG}</th>`
+  ).join('');
 }
 
 /* ---------- 导出图片 ---------- */
@@ -1200,12 +1610,20 @@ async function exportPNG() {
   ctx.fillStyle = PNG.ink3; ctx.font = `11.5px ${FONT}`;
   ctx.fillText('由 nodescope 生成，仅用于网络质量检测', pad, H - 28);
 
-  canvas.toBlob(blob => {
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(blob);
-    a.download = `节点测速报告_${now.toISOString().slice(0, 10)}.png`;
-    a.click();
-    URL.revokeObjectURL(a.href);
+  return new Promise((resolve, reject) => {
+    canvas.toBlob(blob => {
+      if (!blob) { reject(new Error('生成图片失败，画布可能过大')); return; }
+      try {
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = `节点测速报告_${now.toISOString().slice(0, 10)}.png`;
+        a.click();
+        URL.revokeObjectURL(a.href);
+        resolve();
+      } catch (err) {
+        reject(err);
+      }
+    });
   });
 }
 
@@ -1240,11 +1658,15 @@ function exportNodes() {
   a.download = `available_nodes_${new Date().toISOString().slice(0, 10)}.yaml`;
   a.click();
   URL.revokeObjectURL(a.href);
-  // 提示收在浮层里不显眼，导出结果直接在按钮上短暂显示
+  // 提示收在浮层里不显眼，导出结果直接在按钮上短暂显示成功态
   const btn = $('exportNodesBtn');
   clearTimeout(btn._t);
-  btn.textContent = `已导出 ${availableRaw.length} 个`;
-  btn._t = setTimeout(() => { btn.textContent = '导出可用节点'; }, 2000);
+  btn.textContent = `✓ 已导出 ${availableRaw.length} 个`;
+  btn.classList.add('done');
+  btn._t = setTimeout(() => {
+    btn.textContent = '导出可用节点';
+    btn.classList.remove('done');
+  }, 1800);
 }
 
 function ellipsize(ctx, text, maxW) {
@@ -1254,10 +1676,50 @@ function ellipsize(ctx, text, maxW) {
   return text + '…';
 }
 
+function handleExportPNG() {
+  const btn = $('pngBtn');
+  if (btn.disabled) return;
+  clearTimeout(btn._t);
+  btn.classList.remove('done');
+  btn.textContent = '生成中…';
+  exportPNG().then(() => {
+    btn.textContent = '✓ 已保存图片';
+    btn.classList.add('done');
+    btn._t = setTimeout(() => {
+      btn.textContent = '导出图片';
+      btn.classList.remove('done');
+    }, 1800);
+  }).catch(e => {
+    btn.textContent = '导出图片';
+    chip('导出失败: ' + e.message, 'err');
+  });
+}
+
+/* ---------- 进度条与表格滚动状态 ---------- */
+function setBarState(state) {
+  const bar = $('bar');
+  bar.classList.remove('indeterminate', 'is-done', 'is-stop', 'is-err');
+  if (state) bar.classList.add(state);
+}
+function syncTableScroll() {
+  const panel = $('tablePanel');
+  if (panel) panel.classList.toggle('scrolled', panel.scrollTop > 0);
+}
+$('tablePanel').addEventListener('scroll', syncTableScroll, { passive: true });
+
 /* ---------- 主流程 ---------- */
 function start() {
   const src = $('src').value.trim();
-  if (!src) { $('src').focus(); return; }
+  if (!src) {
+    const input = $('src');
+    input.focus({ preventScroll: true });
+    input.classList.remove('shake');
+    void input.offsetWidth;
+    input.classList.add('shake');
+    clearTimeout(input._shakeTimer);
+    input._shakeTimer = setTimeout(() => input.classList.remove('shake'), 320);
+    return;
+  }
   currentSrc = src;
   if (es) es.close();
   if (pendingStart) pendingStart.abort();
@@ -1268,14 +1730,23 @@ function start() {
   $('resSrc').textContent = `${maskSrc(src)} · ${optsSummary()}`;
   showView('results');
   $('filterInput').value = '';
+  $('filterEmpty').hidden = true;
+  $('tablePanel').scrollTop = 0;
+  syncTableScroll();
   $('empty').style.display = 'none';
   $('empty').className = 'empty';
-  $('stats').style.display = 'none';
-  $('barFill').style.width = '0';
+  $('stats').hidden = true;
+  $('stats').classList.remove('entering');
+  $('barFill').style.transform = 'scaleX(0)';
+  setBarState('indeterminate');
   $('progressText').textContent = '提交任务…';
   $('progressCount').textContent = '';
   $('pngBtn').disabled = true;
+  $('pngBtn').classList.remove('done');
+  $('pngBtn').textContent = '导出图片';
   $('exportNodesBtn').disabled = true;
+  $('exportNodesBtn').classList.remove('done');
+  $('exportNodesBtn').textContent = '导出可用节点';
   $('runBtn').textContent = '停止'; $('runBtn').classList.add('stop');
   sortState = { key: null, asc: true };
   testNoSpeed = $('noSpeed').checked;
@@ -1315,6 +1786,7 @@ function start() {
   .catch(err => {
     if (ctrl.signal.aborted) return;
     pendingStart = null;
+    setBarState('is-err');
     chip('发起测试失败：' + err.message, 'err');
     stopUIReset();
   });
@@ -1332,7 +1804,7 @@ function setupEventSource(stream) {
     const row = rows[d.name];
     if (row && row._tr) {
       row._tr.classList.add('testing-node');
-      const stCell = row._tr.cells[row._tr.cells.length - 1];
+      const stCell = row._tr.querySelector('[data-col="status"]') || row._tr.cells[row._tr.cells.length - 1];
       if (stCell) stCell.innerHTML = '<span class="st st-run"><span class="spin"></span>测速中</span>';
       pinTestingRow(row._tr);
       $('progressText').textContent = `正在测速：${d.name}`;
@@ -1367,20 +1839,30 @@ function setupEventSource(stream) {
     if (m.fake_ip && m.tun_iface) chip('检测到 TUN，已绑定 ' + m.tun_iface + ' 绕过', 'warn');
     else if (m.fake_ip) chip('检测到 fake-ip，但没能自动选到物理网卡，测速可能失败。可用 --iface 指定网卡', 'err');
     saveRecent(currentSrc, { count: m.count });
+    const frag = document.createDocumentFragment();
+    const animateRows = !isReducedMotion();
     m.nodes.forEach((n, i) => {
       const tr = document.createElement('tr');
-      tr.className = 'pending';
+      tr.className = 'pending' + (animateRows && i < 16 ? ' row-enter' : '');
+      if (animateRows && i < 16) {
+        tr.style.animationDelay = (i * 12) + 'ms';
+        tr.addEventListener('animationend', () => {
+          tr.classList.remove('row-enter');
+          tr.style.animationDelay = '';
+        }, { once: true });
+      }
       tr.innerHTML = `<td class="num rank">${i + 1}</td>` +
         `<td class="name"><div class="name-txt" title="${esc(n.name)}">${esc(n.name)}</div></td>` +
-        `<td class="type">${esc(n.type)}</td><td class="dim">-</td>` +
-        `<td class="dim">-</td><td class="dim">-</td>` +
-        `<td class="dim latency-cell">-</td>` +
-        `<td class="dim speed-cell">-</td>` +
-        `<td><span class="st st-wait">排队中</span></td>`;
-      $('tbody').appendChild(tr);
+        `<td class="type">${esc(n.type)}</td><td class="dim" data-col="country">-</td>` +
+        `<td class="dim" data-col="ip">-</td><td class="dim" data-col="unlock">-</td>` +
+        `<td class="dim latency-cell" data-col="latency">-</td>` +
+        `<td class="dim speed-cell" data-col="speed">-</td>` +
+        `<td data-col="status"><span class="st st-wait">排队中</span></td>`;
+      frag.appendChild(tr);
       rows[n.name] = { ...n, userinfo: m.userinfo, _tr: tr, _done: false };
       order.push(n.name);
     });
+    $('tbody').appendChild(frag);
     updateStats();
     setProgress(0, m.count, 0);
   });
@@ -1401,17 +1883,17 @@ function setupEventSource(stream) {
   stream.addEventListener('done', e => {
     const d = JSON.parse(e.data);
     testElapsed = fmtElapsed(Date.now() - testStart);
-    $('barFill').style.width = '100%';
-    $('progressText').textContent = `测速完成，${d.ok}/${d.total} 个节点可用`;
+    $('barFill').style.transform = 'scaleX(1)';
+    setBarState('is-done');
+    const donePrefix = testNoSpeed ? '延迟检测完成' : '测速完成';
+    $('progressText').textContent = `${donePrefix}，${d.ok}/${d.total} 个节点可用`;
     $('progressCount').textContent = `用时 ${testElapsed}`;
     if (!d.ok) chip('没有可用节点', 'warn');
     saveRecent(currentSrc, { count: d.total, ok: d.ok });
-    order.forEach(n => {
-      const r = rows[n];
-      if (r && r._done && r._tr) r._tr.innerHTML = render(r);
-    });
+    // 仅增量刷新「≈ 本机带宽上限」标记，不重建整表避免速度条闪断
+    refreshBaselineMeta();
     updateStats();
-    finishUI();
+    finishUI('done');
     stream.close();
     if (es === stream) es = null;
   });
@@ -1425,7 +1907,8 @@ function setupEventSource(stream) {
     } else {
       chip('连接中断，测试已停止', 'warn');
     }
-    finishUI();
+    setBarState('is-err');
+    finishUI('error');
     stream.close();
     if (es === stream) es = null;
   });
@@ -1442,31 +1925,54 @@ const isRunning = () => !!(es || pendingStart);
 function stopTest() {
   if (es) { es.close(); es = null; }
   if (pendingStart) { pendingStart.abort(); pendingStart = null; }
-  finishUI(); chip('已手动停止', 'warn');
+  setBarState('is-stop');
+  finishUI('stop');
+  chip('已手动停止', 'warn');
   $('progressText').textContent = '已手动停止';
 }
-// 首页与结果页切换：结果页覆盖首页，返回时刷新「最近测过」（可用数在测完时才写入）
+// 首页与结果页切换：双向可打断过渡 + inert 隔离隐藏视图的键盘焦点
 function showView(v) {
   document.body.dataset.view = v;
+  $('home').inert = (v !== 'home');
+  $('results').inert = (v !== 'results');
   if (v === 'home') {
+    setNotesOpen(false);
     renderRecent();
-    $('src').focus();
+    $('src').focus({ preventScroll: true });
   }
 }
-function finishUI() {
+function finishUI(reason) {
   stopUIReset();
-  document.querySelectorAll('tr.testing-node').forEach(tr => tr.classList.remove('testing-node'));
+  // 停止或出错时冻结耗时，避免汇总栏一直停在「测试中」
+  if (!testElapsed && testStart && order.length) {
+    testElapsed = fmtElapsed(Date.now() - testStart);
+    updateStats();
+  }
+  // 清理残留的测速中态（转圈 spinner 与 live 实时速度条），避免中途停止后永远转圈
+  document.querySelectorAll('tr.testing-node').forEach(tr => {
+    tr.classList.remove('testing-node');
+    if (reason !== 'done') {
+      const liveSpd = tr.querySelector('.spd.live');
+      if (liveSpd) liveSpd.classList.remove('live');
+      const stCell = tr.querySelector('[data-col="status"]') || tr.cells[tr.cells.length - 1];
+      if (stCell && stCell.querySelector('.st-run')) {
+        stCell.innerHTML = '<span class="st st-stop">已停止</span>';
+      }
+    }
+  });
   // 完成、出错、手动停止都走这里：测试期间暂缓的排序在此统一执行
   refreshRanks();
 }
 
-$('filterInput').addEventListener('input', () => {
+function applyFilter() {
   const kw = $('filterInput').value.trim().toLowerCase();
+  let visibleCount = 0;
   for (const name of order) {
     const r = rows[name];
     if (!r || !r._tr) continue;
     if (!kw) {
       r._tr.style.display = '';
+      visibleCount++;
       continue;
     }
     const unlockStr = (r.unlock && typeof r.unlock === 'object')
@@ -1480,8 +1986,51 @@ $('filterInput').addEventListener('input', () => {
       unlockStr.includes(kw)
     );
     r._tr.style.display = match ? '' : 'none';
+    if (match) visibleCount++;
   }
+  $('filterEmpty').hidden = !(kw && order.length && visibleCount === 0);
+  syncTableScroll();
+}
+$('filterInput').addEventListener('input', applyFilter);
+$('clearFilterBtn').addEventListener('click', () => {
+  $('filterInput').value = '';
+  applyFilter();
+  $('filterInput').focus({ preventScroll: true });
 });
+
+/* ---------- 分段控件滑动浮块（自适应窗口缩放，首屏不飞入） ---------- */
+function positionSegThumb(seg, immediate) {
+  const thumb = seg.querySelector('.seg-thumb');
+  const checked = seg.querySelector('input:checked');
+  const label = checked && checked.closest('label');
+  if (!thumb || !label) return;
+  if (immediate) seg.classList.remove('ready');
+  thumb.style.width = label.offsetWidth + 'px';
+  thumb.style.transform = `translate3d(${label.offsetLeft}px, 0, 0)`;
+  seg.classList.add('positioned');
+  if (immediate) {
+    requestAnimationFrame(() => { seg.classList.add('ready'); });
+  }
+}
+const segResizeObserver = typeof ResizeObserver !== 'undefined'
+  ? new ResizeObserver(entries => {
+      for (const entry of entries) positionSegThumb(entry.target, true);
+    })
+  : null;
+document.querySelectorAll('.seg').forEach(seg => {
+  const thumb = document.createElement('span');
+  thumb.className = 'seg-thumb';
+  thumb.setAttribute('aria-hidden', 'true');
+  seg.insertBefore(thumb, seg.firstChild);
+  positionSegThumb(seg, true);
+  seg.addEventListener('change', () => positionSegThumb(seg, false));
+  if (segResizeObserver) segResizeObserver.observe(seg);
+});
+if (document.fonts && document.fonts.ready) {
+  document.fonts.ready.then(() => {
+    document.querySelectorAll('.seg').forEach(seg => positionSegThumb(seg, true));
+  });
+}
 
 // 只测延迟时，测速相关选项无意义，置灰
 function syncSpeedOpts() { $('speedOpts').disabled = $('noSpeed').checked; }
@@ -1508,13 +2057,22 @@ $('platforms').innerHTML = Object.values(UNLOCK_ICONS).map(item =>
   `<span class="platform"><span class="icon-badge"><img src="${ICON_BASE}${item.file}" width="16" height="16" alt="" loading="lazy"></span>${esc(item.name)}</span>`
 ).join('');
 
-// 浮层：点外面或按 Esc 收起
+// 浮层：点击按钮切换，点外面或按 Esc 平滑收起（支持动画中途打断）
+$('notesBtn').addEventListener('click', e => {
+  e.stopPropagation();
+  setNotesOpen(!$('notesPop').classList.contains('open'));
+});
 document.addEventListener('click', e => {
-  document.querySelectorAll('details.pop[open]').forEach(d => { if (!d.contains(e.target)) d.open = false; });
+  const pop = $('notesPop');
+  if (pop.classList.contains('open') && !pop.contains(e.target)) setNotesOpen(false);
 });
 document.addEventListener('keydown', e => {
   if (e.key !== 'Escape') return;
-  document.querySelectorAll('details.pop[open]').forEach(d => { d.open = false; d.querySelector('summary').focus(); });
+  const pop = $('notesPop');
+  if (pop.classList.contains('open')) {
+    setNotesOpen(false);
+    $('notesBtn').focus({ preventScroll: true });
+  }
 });
 
 $('go').addEventListener('click', start);
@@ -1527,7 +2085,7 @@ $('runBtn').addEventListener('click', () => {
 });
 $('backBtn').addEventListener('click', () => {
   if (isRunning()) {
-    if (!confirm('测试还在进行，返回首页会停止本次测试。')) return;
+    if (!confirm('测速正在进行，返回首页将停止当前测试。')) return;
     stopTest();
   }
   showView('home');
