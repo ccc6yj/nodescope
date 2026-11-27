@@ -46,34 +46,6 @@
     --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
     color-scheme: light;
   }
-  @media (prefers-color-scheme: dark) {
-    :root:not([data-theme="light"]) {
-      --bg: #131918; --field: #182020; --ink: #E3E9E7; --ink-2: #A7B2AF; --ink-3: #808C88;
-      --rule: #2A3432; --rule-2: #212A28; --hover: rgba(227, 233, 231, .04);
-      --accent: #8595FF; --accent-ink: #10152E; --accent-soft: rgba(133, 149, 255, .12);
-      --good: #4CC59A; --good-soft: rgba(76, 197, 154, .12);
-      --mid: #E2A64C; --bad: #F07A68; --bad-soft: rgba(240, 122, 104, .16); --track: #243030;
-      --tip-bg: #E3E9E7; --tip-ink: #131918;
-      --seg-bg: #0E1312; --seg-on: #2B3634;
-      --seg-shadow: 0 1px 2px rgba(0, 0, 0, .38), inset 0 .5px 0 rgba(255, 255, 255, .08);
-      --pop-shadow: 0 14px 36px rgba(0, 0, 0, .52), 0 0 0 .5px rgba(255, 255, 255, .08);
-      --scroll-shadow: 0 6px 14px -4px rgba(0, 0, 0, .48);
-      color-scheme: dark;
-    }
-  }
-  :root[data-theme="dark"] {
-    --bg: #131918; --field: #182020; --ink: #E3E9E7; --ink-2: #A7B2AF; --ink-3: #808C88;
-    --rule: #2A3432; --rule-2: #212A28; --hover: rgba(227, 233, 231, .04);
-    --accent: #8595FF; --accent-ink: #10152E; --accent-soft: rgba(133, 149, 255, .12);
-    --good: #4CC59A; --good-soft: rgba(76, 197, 154, .12);
-    --mid: #E2A64C; --bad: #F07A68; --bad-soft: rgba(240, 122, 104, .16); --track: #243030;
-    --tip-bg: #E3E9E7; --tip-ink: #131918;
-    --seg-bg: #0E1312; --seg-on: #2B3634;
-    --seg-shadow: 0 1px 2px rgba(0, 0, 0, .38), inset 0 .5px 0 rgba(255, 255, 255, .08);
-    --pop-shadow: 0 14px 36px rgba(0, 0, 0, .52), 0 0 0 .5px rgba(255, 255, 255, .08);
-    --scroll-shadow: 0 6px 14px -4px rgba(0, 0, 0, .48);
-    color-scheme: dark;
-  }
 
   * { box-sizing: border-box; margin: 0; padding: 0; }
   html, body { height: 100%; }
@@ -272,6 +244,8 @@
   .res-title h1 { font-size: 20px; white-space: nowrap; }
   .res-src { color: var(--ink-3); font-size: 13px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   #runBtn { height: 36px; min-width: 104px; padding: 0 18px; }
+  #restartBtn { height: 36px; }
+  #restartBtn[hidden] { display: none; }
 
   /* 进度线：scaleX 零重排 + 等待态克制微光 */
   .bar {
@@ -391,6 +365,15 @@
   .chip.warn { color: var(--mid); border-color: color-mix(in srgb, var(--mid) 35%, transparent); }
   .chip.err  { color: var(--bad); border-color: color-mix(in srgb, var(--bad) 35%, transparent); }
   .chip.good { color: var(--good); border-color: color-mix(in srgb, var(--good) 35%, transparent); }
+  .menu { display: flex; flex-direction: column; gap: 2px; min-width: 172px; }
+  .menu-item {
+    all: unset; display: flex; align-items: center; justify-content: space-between; gap: 12px;
+    padding: 7px 10px; border-radius: 6px; font-size: 13px; color: var(--ink); cursor: pointer; white-space: nowrap;
+    transition: background-color var(--dur-fast) var(--ease-out), color var(--dur-fast) var(--ease-out);
+  }
+  .menu-item small { color: var(--ink-3); font-size: 11.5px; }
+  .menu-item:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+  .pop-panel.menu-panel { padding: 6px; }
 
   /* ---------- 结果表：占满剩余高度，在面板内滚动，表头相对面板吸顶 ---------- */
   .table-panel { flex: 1; min-height: 0; overflow: auto; border-top: 1px solid var(--ink); }
@@ -440,16 +423,33 @@
   .dim { color: var(--ink-3); }
   .rank { color: var(--ink-3); width: 36px; font-size: 12.5px; }
   .name { font-weight: 500; white-space: nowrap; }
+  .name-wrap { display: flex; align-items: center; gap: 6px; max-width: clamp(180px, 28vw, 330px); }
   /* 限宽放在单元格内的块元素上：单元格自身的 max-width 规范未定义（Firefox 会忽略），
      超长节点名会把整列撑开。窄屏时跟着收窄，把宽度让给速度列 */
-  .name-txt { max-width: clamp(160px, 26vw, 300px); overflow: hidden; text-overflow: ellipsis; }
+  .name-txt { flex: 1; min-width: 0; max-width: clamp(160px, 26vw, 300px); overflow: hidden; text-overflow: ellipsis; }
+  .row-actions {
+    display: inline-flex; align-items: center; gap: 2px; flex: none;
+    opacity: .25; transition: opacity var(--dur-fast) var(--ease-out);
+  }
+  tr:hover .row-actions, tr:focus-within .row-actions { opacity: 1; }
+  .act-btn {
+    all: unset; display: inline-flex; align-items: center; justify-content: center;
+    width: 22px; height: 22px; border-radius: 5px; color: var(--ink-3); cursor: pointer;
+    transition: color var(--dur-fast) var(--ease-out), background-color var(--dur-fast) var(--ease-out), transform var(--dur-instant) var(--ease-spring);
+  }
+  .act-btn svg { width: 13px; height: 13px; }
+  .act-btn:active:not(:disabled) { transform: scale(.9); }
+  .act-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .act-btn.done { color: var(--good); }
+  .act-btn[disabled] { opacity: .45; cursor: not-allowed; }
   .type { color: var(--ink-2); font-size: 12.5px; }
   .country { font-weight: 500; font-size: 13px; }
 
-  /* IP 质量：家宽/移动风险低（绿），机房中（默认色），机房且被标记为代理/VPN 高（橙） */
-  .ipq { font-size: 12.5px; white-space: nowrap; color: var(--ink-2); }
+  /* IP 质量：按风险等级着色，与延迟一致 —— 低风险绿，中风险橙，高风险红 */
+  .ipq { font-size: 12.5px; font-weight: 500; white-space: nowrap; color: var(--ink-2); }
   .ipq-low { color: var(--good); }
-  .ipq-high { color: var(--mid); }
+  .ipq-mid { color: var(--mid); }
+  .ipq-high { color: var(--bad); }
 
   /* 延迟：着色数字 */
   .lat { font-family: var(--num); font-size: 15px; font-weight: 600; font-variant-numeric: tabular-nums; }
@@ -512,6 +512,7 @@
   /* 解锁平台图标 */
   .unlock-icons { display: inline-flex; align-items: center; gap: 5px; vertical-align: middle; flex-wrap: nowrap; }
   .icon-badge {
+    position: relative;
     display: inline-flex; align-items: center; justify-content: center; padding: 2px;
     border-radius: 5px; background: #fff; box-shadow: 0 0 0 1px var(--rule-2);
     cursor: default;
@@ -519,23 +520,27 @@
   }
   .icon-badge img { display: block; width: 16px; height: 16px; object-fit: contain; }
 
-  /* 悬停提示：延迟 180ms 进入防扫过乱闪，离开 0ms 立即淡出 */
-  [data-tip] { position: relative; cursor: default; }
-  [data-tip]::after {
-    content: attr(data-tip); position: absolute; bottom: calc(100% + 6px); left: 50%;
-    transform: translateX(-50%) translateY(3px) scale(.96);
+  /* 全局浮层提示：挂在 body 下使用 fixed 定位，避免被测速行层叠上下文、吸顶表头或滚动容器裁切 */
+  [data-tip] { cursor: default; }
+  .tip {
+    position: fixed; top: 0; left: 0; z-index: 9999;
+    max-width: min(360px, calc(100vw - 16px));
     background: var(--tip-bg); color: var(--tip-ink);
     padding: 4px 8px; border-radius: 5px; font: 500 11.5px/1.35 var(--sans);
-    white-space: nowrap; pointer-events: none; opacity: 0; visibility: hidden;
-    transition: opacity var(--dur-instant) var(--ease-in) 0ms,
-                transform var(--dur-instant) var(--ease-in) 0ms,
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    pointer-events: none; opacity: 0; visibility: hidden;
+    transform: translate3d(0, 3px, 0) scale(.96);
+    transition: opacity var(--dur-instant) var(--ease-in),
+                transform var(--dur-instant) var(--ease-in),
                 visibility 0s linear var(--dur-instant);
-    z-index: 9999;
   }
-  /* 表格首行贴近 sticky 表头，Tooltip 向下弹出避免被遮挡 */
-  tbody tr:first-child [data-tip]::after {
-    bottom: auto; top: calc(100% + 6px);
-    transform: translateX(-50%) translateY(-3px) scale(.96);
+  .tip.below { transform: translate3d(0, -3px, 0) scale(.96); }
+  .tip.show {
+    opacity: 1; visibility: visible;
+    transform: translate3d(0, 0, 0) scale(1);
+    transition: opacity var(--dur-fast) var(--ease-out),
+                transform var(--dur-fast) var(--ease-spring),
+                visibility 0s linear 0s;
   }
 
   /* 仅在支持精细悬停的设备上启用悬停交互，防止触屏粘滞 */
@@ -550,6 +555,8 @@
     .back:hover { border-color: var(--accent); color: var(--accent); }
     .back:hover svg { transform: translateX(-2px); }
     .pop-btn:hover { border-color: var(--accent); color: var(--ink); }
+    .menu-item:hover { background: var(--hover); color: var(--accent); }
+    .act-btn:hover:not(:disabled) { color: var(--accent); background: var(--hover); }
     thead th:hover { color: var(--ink); }
     tbody tr:hover td { background: var(--hover); }
     tbody tr.testing-node:hover td { background: linear-gradient(var(--accent-soft), var(--accent-soft)), var(--bg); }
@@ -558,16 +565,6 @@
       box-shadow: 0 2px 6px rgba(0, 0, 0, .14), 0 0 0 1px var(--rule);
     }
     .platform .icon-badge:hover { transform: none; box-shadow: 0 0 0 1px var(--rule-2); }
-    [data-tip]:hover::after {
-      opacity: 1; visibility: visible;
-      transform: translateX(-50%) translateY(0) scale(1);
-      transition: opacity var(--dur-fast) var(--ease-out) 180ms,
-                  transform var(--dur-fast) var(--ease-spring) 180ms,
-                  visibility 0s linear 180ms;
-    }
-    tbody tr:first-child [data-tip]:hover::after {
-      transform: translateX(-50%) translateY(0) scale(1);
-    }
   }
 
   @media (max-width: 900px) {
@@ -596,9 +593,10 @@
       --dur-normal: 0.01ms;
       --dur-slow: 0.01ms;
     }
-    .view, .pop-panel, .seg-thumb, .spd-track i, .bar-fill, .icon-badge, .btn, .back, .recent-item {
+    .view, .pop-panel, .seg-thumb, .spd-track i, .bar-fill, .icon-badge, .tip, .btn, .back, .recent-item {
       transition: opacity 80ms linear !important;
     }
+    .tip, .tip.below, .tip.show { transform: none !important; }
     body[data-view="home"] #results,
     body[data-view="results"] #home { transform: none !important; }
     .row-enter, .stats.entering, .chip, #src.shake, .pop-btn b.bump { animation: none !important; }
@@ -704,7 +702,6 @@
         </div>
       </div>
       <label class="check"><input type="checkbox" id="noSpeed"> 只测延迟</label>
-      <label class="check" title="解锁检测要经节点打开各平台页面，每个可用节点约耗 0.5 MB 流量；节点多或流量紧张时可关掉"><input type="checkbox" id="noUnlock"> 不测解锁</label>
     </div>
 
     <div class="intro">
@@ -780,6 +777,7 @@
         <h1>测试结果</h1>
         <span class="res-src" id="resSrc"></span>
       </div>
+      <button class="btn ghost" id="restartBtn" hidden>重新测速</button>
       <button class="btn" id="runBtn">停止</button>
     </header>
 
@@ -793,12 +791,19 @@
         <span id="progressCount"></span>
       </div>
       <div class="tools">
-        <input id="filterInput" class="filter-box" type="search" aria-label="筛选节点" placeholder="筛选节点、落地、IP 类型、解锁平台">
+        <input id="filterInput" class="filter-box" type="search" aria-label="筛选节点" placeholder="筛选节点、地区、解锁…" data-tip="支持空格多词组合，可搜节点名、协议、落地、IP/ISP 和解锁平台">
         <div class="pop" id="notesPop" hidden>
           <button type="button" class="pop-btn" id="notesBtn" aria-expanded="false" aria-controls="notesPanel">提示 <b id="notesCount">0</b></button>
           <div class="pop-panel" id="notesPanel" role="region" aria-label="提示信息"><div class="notes" id="chips"></div></div>
         </div>
-        <button class="btn ghost" id="exportNodesBtn" disabled onclick="exportNodes()">导出可用节点</button>
+        <div class="pop" id="exportPop">
+          <button type="button" class="btn ghost" id="exportNodesBtn" disabled aria-expanded="false" aria-controls="exportPanel">导出可用节点</button>
+          <div class="pop-panel menu-panel" id="exportPanel" role="menu" aria-label="选择导出格式">
+            <button type="button" class="menu-item" role="menuitem" onclick="exportNodes('clash')">Clash 配置 <small>.yaml</small></button>
+            <button type="button" class="menu-item" role="menuitem" onclick="exportNodes('base64')">Base64 订阅 <small>.txt</small></button>
+            <button type="button" class="menu-item" role="menuitem" onclick="exportNodes('singbox')">Sing-box 配置 <small>.json</small></button>
+          </div>
+        </div>
         <button class="btn ghost" id="pngBtn" disabled onclick="handleExportPNG()">导出图片</button>
       </div>
     </div>
@@ -817,6 +822,7 @@
   </section>
   </div>
 </div>
+<div id="tip" class="tip" role="tooltip" aria-hidden="true"></div>
 
 <script>
 const $ = id => document.getElementById(id);
@@ -824,11 +830,13 @@ const val = name => (document.querySelector(`input[name="${name}"]:checked`) || 
 // 导出图片用的字体，与页面的 --sans / --num 保持一致
 const FONT = '-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif';
 const NUM_FONT = '"DIN Alternate","Bahnschrift",-apple-system,"Segoe UI",Roboto,"PingFang SC",sans-serif';
-let es = null, rows = {}, order = [], rawNodes = [], testStart = 0, testElapsed = '', localBW = null;
+let es = null, rows = {}, order = [], rawNodes = [], testStart = 0, accumElapsedMs = 0, testElapsed = '', localBW = null;
 // 本场测试是否只测延迟（开测时记下，结果页与导出图据此收窄速度列）
 let testNoSpeed = false;
 // 任务提交中（EventSource 尚未建立）时的中止器：此时点「停止」也必须能停，不能再开一场
 let pendingStart = null;
+// 单节点复测中的中止控制器，保证同时仅一个复测并在停止/重测/返回时取消
+let retestCtrl = null;
 
 // 解锁平台图标：来自 walkxcode/dashboard-icons，已下载到 static/icons/ 由本地服务提供，
 // 不依赖 CDN（国内常加载失败、测速时还可能走 TUN），也不向第三方暴露正在测速
@@ -852,16 +860,18 @@ const latTier = v => v < 300 ? 'good' : v < 800 ? 'mid' : 'bad';
 const IP_RISK = { low: 0, mid: 1, high: 2 };
 const IP_RISK_NAME = { low: '低', mid: '中', high: '高' };
 const ipLabel = q => (q && q.type) ? q.type + (q.proxy ? '·代理' : '') : '';
-function ipTip(q) {
+function ipTip(q, ip) {
   const parts = [`风险${IP_RISK_NAME[q.risk] || '?'}`];
+  if (q.type === '未确认') parts.push('仅单源未标机房，未复核是否家宽');
   if (q.proxy) parts.push('已被标记为代理/VPN');
-  return parts.concat([q.isp, q.asn].filter(Boolean)).join(' | ');
+  return parts.concat([q.isp, ip || q.asn].filter(Boolean)).join(' | ');
 }
-function renderIp(q) {
+function renderIp(q, ip) {
   const label = ipLabel(q);
-  return label
-    ? `<span class="ipq ipq-${esc(q.risk)}" data-tip="${esc(ipTip(q))}">${esc(label)}</span>`
-    : '<span class="dim">-</span>';
+  if (label) {
+    return `<span class="ipq ipq-${esc(q.risk)}" data-tip="${esc(ipTip(q, ip))}">${esc(label)}</span>`;
+  }
+  return ip ? `<span class="dim" data-tip="${esc(ip)}">-</span>` : '<span class="dim">-</span>';
 }
 
 function renderUnlock(u) {
@@ -1199,14 +1209,29 @@ function refreshBaselineMeta() {
   }
 }
 
-function updateRow(name, r) {
+function updateRow(name, r, opts) {
   const row = rows[name];
   if (!row) return;
+  const keepPos = !!(opts && opts.keepPosition);
+  const keepTesting = !!(opts && opts.keepTesting);
   Object.assign(row, r);
   row._done = true;
   const tr = row._tr;
-  tr.classList.remove('pending', 'testing-node');
+  const wasTesting = tr.classList.contains('testing-node');
+  tr.classList.remove('pending');
+  if (!keepTesting) tr.classList.remove('testing-node');
   tr.classList.toggle('node-failed', !r.ok);
+  if (!keepPos && !sortState.key && tr.cells[0]) {
+    const idx = order.indexOf(name);
+    if (idx >= 0) tr.cells[0].textContent = idx + 1;
+  }
+  if (!keepPos && !keepTesting && !sortState.key && wasTesting) {
+    const testingRows = $('tbody').querySelectorAll('tr.testing-node');
+    const lastTesting = testingRows[testingRows.length - 1];
+    if (lastTesting && (lastTesting.compareDocumentPosition(tr) & Node.DOCUMENT_POSITION_PRECEDING)) {
+      flipMove(() => lastTesting.after(tr));
+    }
+  }
 
   // 增量更新变化单元格：保留序号、节点名、协议及已有速度条 DOM，消除重排与闪烁
   const col = k => tr.querySelector(`[data-col="${k}"]`);
@@ -1219,7 +1244,7 @@ function updateRow(name, r) {
   if (ipCell) {
     ipCell.className = '';
     ipCell.dataset.risk = (row.ip_quality && row.ip_quality.risk in IP_RISK) ? String(IP_RISK[row.ip_quality.risk]) : '';
-    ipCell.innerHTML = renderIp(row.ip_quality);
+    ipCell.innerHTML = renderIp(row.ip_quality, row.ip);
   }
   const unlockCell = col('unlock');
   if (unlockCell) {
@@ -1249,7 +1274,10 @@ function updateRow(name, r) {
       (!row.ok && row.error ? `<div class="error" title="${esc(row.error)}">${esc(errBrief(row.error))}</div>` : '');
   }
 
+  if (tipTarget && !tipTarget.isConnected) hideTip();
+
   updateStats();
+  if (!keepPos && sortState.key) scheduleLiveSort();
   if (order.some(n => rows[n]._done)) {
     $('pngBtn').disabled = false;
     if (order.some(n => rows[n]._done && rows[n].ok)) $('exportNodesBtn').disabled = false;
@@ -1267,6 +1295,7 @@ const FLIP_MS = 300;
 const FLIP_MAX_ROWS = 40;
 
 function flipMove(mutate) {
+  if (tipTarget) hideTip();
   const tbody = $('tbody');
   if (isReducedMotion()) { mutate(); return; }
   const trs = [...tbody.rows].filter(tr => tr.style.display !== 'none');
@@ -1312,16 +1341,46 @@ function flipMove(mutate) {
   }
 }
 
-// 开始测速的节点挪到表格最上方，方便盯着看实时速度。
-// 用户手动点了列排序时尊重其排序，不挪动
+// 开始测速的节点始终挪到表格最上方，方便盯着看实时速度；
+// 即使处于列排序状态，也只排在顶部置顶区，测完后自动滑回对应排序位置
 function pinTestingRow(tr) {
   const tbody = $('tbody');
-  if (sortState.key || tbody.firstElementChild === tr) return;
+  if (tbody.firstElementChild === tr) return;
   flipMove(() => tbody.insertBefore(tr, tbody.firstElementChild));
 }
 
 /* ---------- 排序 ---------- */
 let sortState = { key: null, asc: true };
+let liveSortTimer = null;
+
+function clearLiveSort() {
+  clearTimeout(liveSortTimer);
+  liveSortTimer = null;
+}
+
+function scheduleLiveSort() {
+  if (!sortState.key) return;
+  clearTimeout(liveSortTimer);
+  liveSortTimer = setTimeout(() => {
+    liveSortTimer = null;
+    if (sortState.key) flipMove(applySort);
+  }, 60);
+}
+
+const defaultSortAsc = k => !(k === 'speed' || k === 'status' || k === 'unlock');
+
+function nextSortState(cur, k) {
+  if (cur.key !== k) return { key: k, asc: defaultSortAsc(k) };
+  if (cur.asc === defaultSortAsc(k)) return { key: k, asc: !cur.asc };
+  return { key: null, asc: true };
+}
+
+function sortRowsKeepingTesting(rowsArr, compareFn) {
+  const testing = rowsArr.filter(tr => tr.classList.contains('testing-node'));
+  const rest = rowsArr.filter(tr => !tr.classList.contains('testing-node'));
+  rest.sort(compareFn);
+  return { testing, rest };
+}
 
 function updateSortIndicators() {
   document.querySelectorAll('#tbl thead th[data-k]').forEach(th => {
@@ -1366,32 +1425,52 @@ function applySort() {
     return text;
   }
 
-  rowsArr.sort((a, b) => {
+  const { testing, rest } = sortRowsKeepingTesting(rowsArr, (a, b) => {
     const va = cellVal(a), vb = cellVal(b);
     if (va === null && vb === null) return 0;
     if (va === null) return 1;
     if (vb === null) return -1;
-    const cmp = (typeof va === 'number' && typeof vb === 'number')
+    return (typeof va === 'number' && typeof vb === 'number')
       ? (sortState.asc ? va - vb : vb - va)
       : (sortState.asc ? String(va).localeCompare(String(vb), 'zh') : String(vb).localeCompare(String(va), 'zh'));
-    return cmp;
   });
-  rowsArr.forEach(tr => tbody.appendChild(tr));
-  rowsArr.forEach((tr, i) => {
+  testing.forEach(tr => {
+    tbody.appendChild(tr);
+    if (tr.cells[0]) tr.cells[0].textContent = '-';
+  });
+  rest.forEach((tr, i) => {
+    tbody.appendChild(tr);
     if (tr.cells[0]) tr.cells[0].textContent = i + 1;
   });
 }
 
 function handleSortClick(k) {
   if (!k) return;
-  if (sortState.key === k) {
-    sortState.asc = !sortState.asc;
-  } else {
-    sortState.key = k;
-    sortState.asc = !(k === 'speed' || k === 'status' || k === 'unlock');
-  }
+  clearLiveSort();
+  sortState = nextSortState(sortState, k);
   updateSortIndicators();
-  flipMove(applySort);
+  if (sortState.key) {
+    flipMove(applySort);
+    return;
+  }
+  if (!isRunning()) {
+    refreshRanks();
+    return;
+  }
+  const tbody = $('tbody');
+  flipMove(() => {
+    const testing = [...tbody.rows].filter(tr => tr.classList.contains('testing-node'));
+    testing.forEach(tr => {
+      tbody.appendChild(tr);
+      if (tr.cells[0]) tr.cells[0].textContent = '-';
+    });
+    order.forEach((name, i) => {
+      const tr = rows[name] && rows[name]._tr;
+      if (!tr || tr.classList.contains('testing-node')) return;
+      tbody.appendChild(tr);
+      if (tr.cells[0]) tr.cells[0].textContent = i + 1;
+    });
+  });
 }
 
 // 使用事件委托，避免 start() 重置 thead 时监听器丢失；同时支持键盘 Enter/Space 排序
@@ -1410,6 +1489,7 @@ tblHead.addEventListener('keydown', e => {
 });
 
 function refreshRanks() {
+  clearLiveSort();
   if (sortState.key) { flipMove(applySort); return; }
   const sorted = order.slice().sort((a, b) => rankVal(rows[b]) - rankVal(rows[a]));
   const tbody = $('tbody');
@@ -1432,7 +1512,7 @@ function renderHead() {
     ['name', '节点', ''],
     ['type', '协议', ''],
     ['country', '落地', ''],
-    ['ip', 'IP', '出口 IP 类型与风险：家宽/移动风险低，机房中，机房且被标记为代理/VPN 高（AI 服务最容易风控）。悬停数值看 ISP / ASN'],
+    ['ip', 'IP', '出口 IP 类型与风险：低风险绿（双源核验家宽/移动）、中风险橙（机房/未确认）、高风险红（机房·代理）。悬停数值看 ISP / 出口 IP'],
     ['unlock', '解锁', ''],
     ['latency', '延迟', '经节点的真实端到端延迟（悬停数值可看 TCP 直连入口延迟）'],
     ['speed', '下载速度 (Mbps)', ''],
@@ -1556,7 +1636,7 @@ async function exportPNG() {
     ctx.fillText(r.type || '?', colX[ci.type] + 10, cy);
     ctx.fillText(ellipsize(ctx, r.country || '-', cols[ci.country].w - 16), colX[ci.country] + 10, cy);
     const ipq = r.ip_quality;
-    ctx.fillStyle = !ipLabel(ipq) ? PNG.ink3 : ipq.risk === 'low' ? PNG.good : ipq.risk === 'high' ? PNG.mid : PNG.ink2;
+    ctx.fillStyle = !ipLabel(ipq) ? PNG.ink3 : ipq.risk === 'low' ? PNG.good : ipq.risk === 'mid' ? PNG.mid : ipq.risk === 'high' ? PNG.bad : PNG.ink2;
     ctx.fillText(ellipsize(ctx, ipLabel(ipq) || '-', cols[ci.ip].w - 16), colX[ci.ip] + 10, cy);
     // 解锁：与页面表格一致，白底圆角小块里画平台图标；没有图标的平台接在后面写名称
     const unlocked = (r.unlock && typeof r.unlock === 'object')
@@ -1627,10 +1707,35 @@ async function exportPNG() {
   });
 }
 
-function exportNodes() {
-  const okNames = new Set(order.filter(n => rows[n]._done && rows[n].ok));
+function exportBtnDefaultLabel() {
+  return $('filterInput') && $('filterInput').value.trim() ? '导出筛选节点' : '导出可用节点';
+}
+
+function setExportMenuOpen(open) {
+  const pop = $('exportPop');
+  if (!pop) return;
+  pop.classList.toggle('open', open);
+  $('exportNodesBtn').setAttribute('aria-expanded', String(open));
+}
+
+function downloadText(content, filename, mime) {
+  const blob = new Blob([content], { type: mime });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
+
+async function exportNodes(fmt = 'clash') {
+  setExportMenuOpen(false);
+  const kw = $('filterInput') ? $('filterInput').value.trim() : '';
+  const okNames = new Set(order.filter(n => {
+    const r = rows[n];
+    return r && r._done && r.ok && (!kw || matchesFilter(r, kw));
+  }));
   if (!okNames.size) {
-    chip('没有可用节点可导出', 'warn');
+    chip(kw ? '当前筛选结果中没有可用节点可导出' : '没有可用节点可导出', 'warn');
     return;
   }
   // 按排名导出（速度降序，没测速的按延迟），与 CLI 的 --export-nodes 一致，客户端里最快的排最前
@@ -1640,33 +1745,29 @@ function exportNodes() {
     chip('没有找到原始节点配置', 'warn');
     return;
   }
-  let yamlText = 'proxies:\n';
-  availableRaw.forEach(n => {
-    yamlText += `  - name: ${JSON.stringify(n.name)}\n    type: ${n.type}\n    server: ${JSON.stringify(n.server)}\n    port: ${n.port}\n`;
-    for (const [k, v] of Object.entries(n)) {
-      if (['name', 'type', 'server', 'port'].includes(k)) continue;
-      yamlText += `    ${k}: ${JSON.stringify(v)}\n`;
-    }
-  });
-  yamlText += '\nproxy-groups:\n  - name: PROXIES\n    type: select\n    proxies:\n';
-  availableRaw.forEach(n => {
-    yamlText += `      - ${JSON.stringify(n.name)}\n`;
-  });
-  const blob = new Blob([yamlText], { type: 'text/yaml;charset=utf-8' });
-  const a = document.createElement('a');
-  a.href = URL.createObjectURL(blob);
-  a.download = `available_nodes_${new Date().toISOString().slice(0, 10)}.yaml`;
-  a.click();
-  URL.revokeObjectURL(a.href);
-  // 提示收在浮层里不显眼，导出结果直接在按钮上短暂显示成功态
   const btn = $('exportNodesBtn');
   clearTimeout(btn._t);
-  btn.textContent = `✓ 已导出 ${availableRaw.length} 个`;
-  btn.classList.add('done');
-  btn._t = setTimeout(() => {
-    btn.textContent = '导出可用节点';
-    btn.classList.remove('done');
-  }, 1800);
+  try {
+    const res = await fetch('/api/export', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ format: fmt, nodes: availableRaw }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || ('HTTP ' + res.status));
+    downloadText(data.content, data.filename, data.mime);
+    if (data.skipped > 0) {
+      chip(`已跳过 ${data.skipped} 个当前导出格式不支持的节点`, 'warn');
+    }
+    btn.textContent = `✓ 已导出 ${data.count} 个`;
+    btn.classList.add('done');
+    btn._t = setTimeout(() => {
+      btn.textContent = exportBtnDefaultLabel();
+      btn.classList.remove('done');
+    }, 1800);
+  } catch (err) {
+    chip('导出失败: ' + err.message, 'err');
+  }
 }
 
 function ellipsize(ctx, text, maxW) {
@@ -1702,6 +1803,7 @@ function setBarState(state) {
   if (state) bar.classList.add(state);
 }
 function syncTableScroll() {
+  hideTip();
   const panel = $('tablePanel');
   if (panel) panel.classList.toggle('scrolled', panel.scrollTop > 0);
 }
@@ -1723,10 +1825,11 @@ function start() {
   currentSrc = src;
   if (es) es.close();
   if (pendingStart) pendingStart.abort();
+  if (retestCtrl) { retestCtrl.abort(); retestCtrl = null; }
   $('tbody').innerHTML = '';
   rows = {}; order = []; localBW = null;
   clearNotes();
-  testStart = Date.now(); testElapsed = '';
+  accumElapsedMs = 0; testStart = Date.now(); testElapsed = '';
   $('resSrc').textContent = `${maskSrc(src)} · ${optsSummary()}`;
   showView('results');
   $('filterInput').value = '';
@@ -1747,7 +1850,10 @@ function start() {
   $('exportNodesBtn').disabled = true;
   $('exportNodesBtn').classList.remove('done');
   $('exportNodesBtn').textContent = '导出可用节点';
+  setExportMenuOpen(false);
   $('runBtn').textContent = '停止'; $('runBtn').classList.add('stop');
+  $('restartBtn').hidden = true;
+  clearLiveSort();
   sortState = { key: null, asc: true };
   testNoSpeed = $('noSpeed').checked;
   $('tbl').classList.toggle('no-speed', testNoSpeed);
@@ -1761,7 +1867,7 @@ function start() {
     concurrency: val('concurrency'),
     speed_conc: val('speedConc'),
     nospeed: $('noSpeed').checked ? '1' : '0',
-    unlock: $('noUnlock').checked ? '0' : '1',  // 流媒体 / AI 解锁默认检测
+    unlock: '1',  // 流媒体 / AI 解锁默认检测
   };
 
   const ctrl = new AbortController();
@@ -1804,6 +1910,7 @@ function setupEventSource(stream) {
     const row = rows[d.name];
     if (row && row._tr) {
       row._tr.classList.add('testing-node');
+      if (row._tr.cells[0]) row._tr.cells[0].textContent = '-';
       const stCell = row._tr.querySelector('[data-col="status"]') || row._tr.cells[row._tr.cells.length - 1];
       if (stCell) stCell.innerHTML = '<span class="st st-run"><span class="spin"></span>测速中</span>';
       pinTestingRow(row._tr);
@@ -1851,8 +1958,13 @@ function setupEventSource(stream) {
           tr.style.animationDelay = '';
         }, { once: true });
       }
+      const copyBtn = n.uri
+        ? `<button type="button" class="act-btn" data-act="copy" data-tip="复制节点链接" aria-label="复制节点链接"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="5.5" y="5.5" width="8" height="8" rx="1.5"/><path d="M10.5 5.5V3.8A1.3 1.3 0 0 0 9.2 2.5H3.8A1.3 1.3 0 0 0 2.5 3.8v5.4a1.3 1.3 0 0 0 1.3 1.3h1.7"/></svg></button>`
+        : '';
+      const retestBtn = `<button type="button" class="act-btn" data-act="retest" data-tip="复测该节点" aria-label="复测该节点"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M13.5 8a5.5 5.5 0 1 1-1.4-3.7"/><path d="M13.5 2.5v2.7h-2.7"/></svg></button>`;
+      tr.dataset.node = n.name;
       tr.innerHTML = `<td class="num rank">${i + 1}</td>` +
-        `<td class="name"><div class="name-txt" title="${esc(n.name)}">${esc(n.name)}</div></td>` +
+        `<td class="name"><div class="name-wrap"><div class="name-txt" title="${esc(n.name)}">${esc(n.name)}</div><span class="row-actions">${copyBtn}${retestBtn}</span></div></td>` +
         `<td class="type">${esc(n.type)}</td><td class="dim" data-col="country">-</td>` +
         `<td class="dim" data-col="ip">-</td><td class="dim" data-col="unlock">-</td>` +
         `<td class="dim latency-cell" data-col="latency">-</td>` +
@@ -1882,14 +1994,20 @@ function setupEventSource(stream) {
 
   stream.addEventListener('done', e => {
     const d = JSON.parse(e.data);
-    testElapsed = fmtElapsed(Date.now() - testStart);
+    if (testStart > 0) {
+      accumElapsedMs += Date.now() - testStart;
+      testStart = 0;
+    }
+    testElapsed = fmtElapsed(accumElapsedMs);
+    const totalAll = order.length || d.total;
+    const okAll = order.length ? order.filter(n => rows[n]._done && rows[n].ok).length : d.ok;
     $('barFill').style.transform = 'scaleX(1)';
     setBarState('is-done');
     const donePrefix = testNoSpeed ? '延迟检测完成' : '测速完成';
-    $('progressText').textContent = `${donePrefix}，${d.ok}/${d.total} 个节点可用`;
+    $('progressText').textContent = `${donePrefix}，${okAll}/${totalAll} 个节点可用`;
     $('progressCount').textContent = `用时 ${testElapsed}`;
-    if (!d.ok) chip('没有可用节点', 'warn');
-    saveRecent(currentSrc, { count: d.total, ok: d.ok });
+    if (!okAll) chip('没有可用节点', 'warn');
+    saveRecent(currentSrc, { count: totalAll, ok: okAll });
     // 仅增量刷新「≈ 本机带宽上限」标记，不重建整表避免速度条闪断
     refreshBaselineMeta();
     updateStats();
@@ -1918,13 +2036,128 @@ function fmtElapsed(ms) {
   const s = Math.round(ms / 1000);
   return s >= 60 ? `${Math.floor(s / 60)}分${s % 60}秒` : `${s}秒`;
 }
-function stopUIReset() {
-  $('runBtn').textContent = '重新测速'; $('runBtn').classList.remove('stop');
+function isNodeFinished(r, noSpeed) {
+  if (!r || !r._done) return false;
+  if (noSpeed) return true;
+  return !r.ok || !!r._speed_tested || r.speed_mbps != null;
 }
+
+function getPendingNodeNames() {
+  return order.filter(n => !isNodeFinished(rows[n], testNoSpeed));
+}
+
+function syncRunButtons() {
+  const runBtn = $('runBtn');
+  const restartBtn = $('restartBtn');
+  if (isRunning()) {
+    runBtn.textContent = '停止';
+    runBtn.classList.add('stop');
+    restartBtn.hidden = true;
+    return;
+  }
+  runBtn.classList.remove('stop');
+  const hasPending = getPendingNodeNames().length > 0;
+  runBtn.textContent = hasPending ? '继续测速' : '重新测速';
+  restartBtn.hidden = !hasPending;
+}
+
+function stopUIReset() {
+  syncRunButtons();
+}
+
+function resumeTest() {
+  const pendingNames = getPendingNodeNames();
+  if (!pendingNames.length) {
+    $('src').value = currentSrc;
+    start();
+    return;
+  }
+  const pendingSet = new Set(pendingNames);
+  const resumeNodes = rawNodes.filter(n => pendingSet.has(n.name));
+  if (!resumeNodes.length) {
+    $('src').value = currentSrc;
+    start();
+    return;
+  }
+  const probedResults = {};
+  for (const name of pendingNames) {
+    const r = rows[name];
+    if (r && r._done && r.ok) {
+      probedResults[name] = {
+        name: r.name, type: r.type, server: r.server, port: r.port, ok: true,
+        tcp_ms: r.tcp_ms, http_ms: r.http_ms, ip: r.ip, country: r.country,
+        country_code: r.country_code, ip_quality: r.ip_quality, unlock: r.unlock,
+      };
+    }
+  }
+  if (es) { es.close(); es = null; }
+  if (pendingStart) { pendingStart.abort(); pendingStart = null; }
+  if (retestCtrl) { retestCtrl.abort(); retestCtrl = null; }
+
+  for (const name of pendingNames) {
+    const r = rows[name];
+    if (!r || !r._tr) continue;
+    const stCell = r._tr.querySelector('[data-col="status"]');
+    if (stCell) {
+      stCell.innerHTML = (r._done && r.ok)
+        ? '<span class="st st-wait">等待测速</span>'
+        : '<span class="st st-wait">排队中</span>';
+    }
+  }
+
+  testStart = Date.now();
+  testElapsed = '';
+  updateStats();
+  setBarState('');
+  setProgress(0, order.length, 0);
+  $('progressText').textContent = `继续测速（剩余 ${resumeNodes.length} 个节点）…`;
+
+  const ctrl = new AbortController();
+  pendingStart = ctrl;
+  syncRunButtons();
+
+  fetch('/api/task', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    signal: ctrl.signal,
+    body: JSON.stringify({
+      src: currentSrc,
+      resume_nodes: resumeNodes,
+      probed_results: probedResults,
+      skip_baseline: localBW != null,
+      speed_seconds: val('speedSeconds'),
+      maxmb: val('maxMb'),
+      concurrency: val('concurrency'),
+      speed_conc: val('speedConc'),
+      nospeed: testNoSpeed ? '1' : '0',
+      unlock: '1',
+    }),
+  })
+  .then(res => {
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    return res.json();
+  })
+  .then(data => {
+    if (ctrl.signal.aborted) return;
+    pendingStart = null;
+    if (!data.taskId) throw new Error(data.error || '创建续测任务失败');
+    es = new EventSource('/api/stream?taskId=' + encodeURIComponent(data.taskId));
+    setupEventSource(es);
+  })
+  .catch(err => {
+    if (ctrl.signal.aborted) return;
+    pendingStart = null;
+    setBarState('is-err');
+    chip('继续测速失败：' + err.message, 'err');
+    finishUI('error');
+  });
+}
+
 const isRunning = () => !!(es || pendingStart);
 function stopTest() {
   if (es) { es.close(); es = null; }
   if (pendingStart) { pendingStart.abort(); pendingStart = null; }
+  if (retestCtrl) { retestCtrl.abort(); retestCtrl = null; }
   setBarState('is-stop');
   finishUI('stop');
   chip('已手动停止', 'warn');
@@ -1932,6 +2165,7 @@ function stopTest() {
 }
 // 首页与结果页切换：双向可打断过渡 + inert 隔离隐藏视图的键盘焦点
 function showView(v) {
+  hideTip();
   document.body.dataset.view = v;
   $('home').inert = (v !== 'home');
   $('results').inert = (v !== 'results');
@@ -1942,10 +2176,13 @@ function showView(v) {
   }
 }
 function finishUI(reason) {
-  stopUIReset();
-  // 停止或出错时冻结耗时，避免汇总栏一直停在「测试中」
-  if (!testElapsed && testStart && order.length) {
-    testElapsed = fmtElapsed(Date.now() - testStart);
+  // 停止或出错时冻结并累计耗时，避免汇总栏一直停在「测试中」
+  if (testStart > 0) {
+    accumElapsedMs += Date.now() - testStart;
+    testStart = 0;
+  }
+  if (!testElapsed && order.length) {
+    testElapsed = fmtElapsed(accumElapsedMs);
     updateStats();
   }
   // 清理残留的测速中态（转圈 spinner 与 live 实时速度条），避免中途停止后永远转圈
@@ -1960,11 +2197,39 @@ function finishUI(reason) {
       }
     }
   });
+  stopUIReset();
   // 完成、出错、手动停止都走这里：测试期间暂缓的排序在此统一执行
   refreshRanks();
 }
 
+function matchesFilter(r, kw) {
+  const tokens = String(kw || '').trim().toLowerCase().split(/\s+/).filter(Boolean);
+  if (!tokens.length) return true;
+  const unlockParts = [];
+  if (r.unlock && typeof r.unlock === 'object') {
+    for (const [k, v] of Object.entries(r.unlock)) {
+      if (v) {
+        unlockParts.push(k);
+        if (UNLOCK_ICONS[k] && UNLOCK_ICONS[k].name) unlockParts.push(UNLOCK_ICONS[k].name);
+      }
+    }
+  }
+  const q = r.ip_quality;
+  const haystack = [
+    r.name || '',
+    r.type || '',
+    r.country || '',
+    r.ip || '',
+    ipLabel(q),
+    (q && q.isp) || '',
+    (q && q.asn) || '',
+    unlockParts.join(' '),
+  ].join(' ').toLowerCase();
+  return tokens.every(tok => haystack.includes(tok));
+}
+
 function applyFilter() {
+  hideTip();
   const kw = $('filterInput').value.trim().toLowerCase();
   let visibleCount = 0;
   for (const name of order) {
@@ -1975,18 +2240,13 @@ function applyFilter() {
       visibleCount++;
       continue;
     }
-    const unlockStr = (r.unlock && typeof r.unlock === 'object')
-      ? Object.entries(r.unlock).filter(([_, v]) => v).map(([k]) => k).join(' ')
-      : '';
-    const match = (
-      (r.name || '').toLowerCase().includes(kw) ||
-      (r.type || '').toLowerCase().includes(kw) ||
-      (r.country || '').toLowerCase().includes(kw) ||
-      ipLabel(r.ip_quality).includes(kw) ||
-      unlockStr.includes(kw)
-    );
+    const match = matchesFilter(r, kw);
     r._tr.style.display = match ? '' : 'none';
     if (match) visibleCount++;
+  }
+  const expBtn = $('exportNodesBtn');
+  if (expBtn && !expBtn.classList.contains('done')) {
+    expBtn.textContent = exportBtnDefaultLabel();
   }
   $('filterEmpty').hidden = !(kw && order.length && visibleCount === 0);
   syncTableScroll();
@@ -2048,7 +2308,6 @@ function optsSummary() {
     if (val('speedConc') !== '1') parts.push(`同时 ${val('speedConc')} 个`);
   }
   parts.push(`并发 ${val('concurrency')}`);
-  if ($('noUnlock').checked) parts.push('不测解锁');
   return parts.join(' · ');
 }
 
@@ -2057,14 +2316,205 @@ $('platforms').innerHTML = Object.values(UNLOCK_ICONS).map(item =>
   `<span class="platform"><span class="icon-badge"><img src="${ICON_BASE}${item.file}" width="16" height="16" alt="" loading="lazy"></span>${esc(item.name)}</span>`
 ).join('');
 
+// 单节点快捷操作：复制链接 / 单节点复测
+async function copyText(text) {
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    try { await navigator.clipboard.writeText(text); return true; } catch (e) { /* 回退 execCommand */ }
+  }
+  const ta = document.createElement('textarea');
+  ta.value = text;
+  ta.style.cssText = 'position:fixed;opacity:0;pointer-events:none';
+  document.body.appendChild(ta);
+  ta.select();
+  let ok = false;
+  try { ok = document.execCommand('copy'); } catch (e) { ok = false; }
+  ta.remove();
+  return ok;
+}
+
+$('tbody').addEventListener('click', async e => {
+  const btn = e.target.closest('.act-btn');
+  if (!btn) return;
+  const tr = btn.closest('tr');
+  const name = tr && tr.dataset.node;
+  const row = name && rows[name];
+  if (!row) return;
+  const act = btn.dataset.act;
+  if (act === 'copy') {
+    if (!row.uri) return;
+    if (await copyText(row.uri)) {
+      if (!btn._origHtml) btn._origHtml = btn.innerHTML;
+      clearTimeout(btn._t);
+      btn.classList.add('done');
+      btn.innerHTML = '✓';
+      btn._t = setTimeout(() => {
+        btn.classList.remove('done');
+        btn.innerHTML = btn._origHtml;
+      }, 1200);
+    }
+  } else if (act === 'retest') {
+    if (isRunning() || retestCtrl || btn.disabled) {
+      chip(isRunning() ? '整场测试进行中，请等待完成或停止后再单独复测' : '已有节点正在复测中，请稍候', 'warn');
+      return;
+    }
+    const rawNode = rawNodes.find(n => n.name === name);
+    if (!rawNode) return;
+    btn.disabled = true;
+    const prevRow = { ...row };
+    const prevPending = tr.classList.contains('pending');
+    const prevFailed = tr.classList.contains('node-failed');
+    const stCell = tr.querySelector('[data-col="status"]');
+    const speedCell = tr.querySelector('.speed-cell');
+    const prevStatusHtml = stCell ? stCell.innerHTML : '';
+    const prevSpeedHtml = speedCell ? speedCell.innerHTML : '';
+    const prevProgressText = $('progressText').textContent;
+    let probedOk = false;
+
+    const ctrl = new AbortController();
+    retestCtrl = ctrl;
+    tr.classList.remove('pending', 'node-failed');
+    tr.classList.add('testing-node');
+    if (stCell) stCell.innerHTML = '<span class="st st-run"><span class="spin"></span>复测中</span>';
+    setBarState('');
+    $('barFill').style.transform = 'scaleX(0.08)';
+    $('progressText').textContent = `复测「${name}」：准备中…`;
+
+    const setRetestBar = pct => {
+      if (typeof pct === 'number') {
+        $('barFill').style.transform = `scaleX(${Math.max(0.05, Math.min(1, pct / 100))})`;
+      }
+    };
+
+    try {
+      const res = await fetch('/api/retest', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        signal: ctrl.signal,
+        body: JSON.stringify({
+          node: rawNode,
+          speed_seconds: val('speedSeconds'),
+          maxmb: val('maxMb'),
+          nospeed: testNoSpeed ? '1' : '0',
+          unlock: '1',
+        }),
+      });
+      if (!res.ok) {
+        let msg = 'HTTP ' + res.status;
+        try { const errObj = await res.json(); if (errObj.error) msg = errObj.error; } catch (_) {}
+        throw new Error(msg);
+      }
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = '';
+      let finalResult = null;
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true }).replace(/\r\n/g, '\n');
+        let sep;
+        while ((sep = buf.indexOf('\n\n')) >= 0) {
+          const block = buf.slice(0, sep);
+          buf = buf.slice(sep + 2);
+          let evt = 'message';
+          const dataLines = [];
+          for (const line of block.split('\n')) {
+            if (line.startsWith('event:')) evt = line.slice(6).trim();
+            else if (line.startsWith('data:')) dataLines.push(line.slice(5).trimStart());
+          }
+          if (!dataLines.length) continue;
+          const payload = JSON.parse(dataLines.join('\n'));
+          if (evt === 'status') {
+            if (payload.message) $('progressText').textContent = payload.message;
+            setRetestBar(payload.pct);
+          } else if (evt === 'probe') {
+            if (payload.ok) probedOk = true;
+            const willSpeed = !!(payload.ok && !testNoSpeed);
+            updateRow(name, payload, { keepPosition: true, keepTesting: willSpeed });
+            if (willSpeed && stCell) {
+              stCell.innerHTML = '<span class="st st-run"><span class="spin"></span>测速中</span>';
+            }
+          } else if (evt === 'speed_tick') {
+            if (speedCell) {
+              const live = speedCell.querySelector('.spd.live');
+              if (live) {
+                live.style.setProperty('--v', payload.speed_mbps);
+                live.querySelector('.spd-num').textContent = payload.speed_mbps.toFixed(1);
+              } else {
+                speedCell.classList.remove('dim');
+                speedCell.innerHTML = speedBar(payload.speed_mbps, 'live');
+              }
+            }
+            $('progressText').textContent = `复测「${name}」：${payload.speed_mbps.toFixed(1)} Mbps`;
+            setRetestBar(payload.pct);
+          } else if (evt === 'done') {
+            finalResult = payload.result;
+          } else if (evt === 'error') {
+            throw new Error(payload.message || '复测失败');
+          }
+        }
+      }
+      if (!finalResult) throw new Error('复测连接提前结束');
+      updateRow(name, finalResult, { keepPosition: true });
+      refreshBaselineMeta();
+      updateStats();
+      syncRunButtons();
+      setBarState('is-done');
+      $('barFill').style.transform = 'scaleX(1)';
+      $('progressText').textContent = `复测完成：${name}`;
+    } catch (err) {
+      tr.classList.remove('testing-node');
+      if (probedOk) {
+        row._done = true;
+        row._speed_tested = false;
+        if (speedCell) syncSpeedCell(speedCell, row, effBaseline());
+        if (stCell) {
+          stCell.innerHTML = ctrl.signal.aborted
+            ? '<span class="st st-stop">已停止</span>'
+            : '<span class="st st-ok">可用</span>';
+        }
+        updateStats();
+        syncRunButtons();
+      } else {
+        Object.assign(row, prevRow);
+        if (prevRow._done) {
+          updateRow(name, prevRow, { keepPosition: true });
+        } else {
+          tr.classList.toggle('pending', prevPending);
+          tr.classList.toggle('node-failed', prevFailed);
+        }
+        if (stCell) stCell.innerHTML = prevStatusHtml;
+        if (speedCell) speedCell.innerHTML = prevSpeedHtml;
+        updateStats();
+      }
+      if (!ctrl.signal.aborted) {
+        setBarState('is-err');
+        $('progressText').textContent = prevProgressText;
+        chip(`复测「${name}」失败：${err.message}`, 'err');
+      }
+    } finally {
+      if (retestCtrl === ctrl) retestCtrl = null;
+      btn.disabled = false;
+    }
+  }
+});
+
 // 浮层：点击按钮切换，点外面或按 Esc 平滑收起（支持动画中途打断）
 $('notesBtn').addEventListener('click', e => {
   e.stopPropagation();
+  setExportMenuOpen(false);
   setNotesOpen(!$('notesPop').classList.contains('open'));
+});
+$('exportNodesBtn').addEventListener('click', e => {
+  e.stopPropagation();
+  if ($('exportNodesBtn').disabled) return;
+  setNotesOpen(false);
+  setExportMenuOpen(!$('exportPop').classList.contains('open'));
 });
 document.addEventListener('click', e => {
   const pop = $('notesPop');
   if (pop.classList.contains('open') && !pop.contains(e.target)) setNotesOpen(false);
+  const exp = $('exportPop');
+  if (exp && exp.classList.contains('open') && !exp.contains(e.target)) setExportMenuOpen(false);
 });
 document.addEventListener('keydown', e => {
   if (e.key !== 'Escape') return;
@@ -2073,13 +2523,24 @@ document.addEventListener('keydown', e => {
     setNotesOpen(false);
     $('notesBtn').focus({ preventScroll: true });
   }
+  const exp = $('exportPop');
+  if (exp && exp.classList.contains('open')) {
+    setExportMenuOpen(false);
+    $('exportNodesBtn').focus({ preventScroll: true });
+  }
 });
 
 $('go').addEventListener('click', start);
 $('src').addEventListener('keydown', e => { if (e.key === 'Enter') start(); });
-// 结果页右上角：测试中是「停止」，结束后是「重新测速」（用同一个订阅和当前选项）
+// 结果页右上角：测试中是「停止」；手动停止且有未完成节点时「继续测速」+「重新测速」；全部测完为「重新测速」
 $('runBtn').addEventListener('click', () => {
   if (isRunning()) { stopTest(); return; }
+  if (getPendingNodeNames().length > 0) { resumeTest(); return; }
+  $('src').value = currentSrc;
+  start();
+});
+$('restartBtn').addEventListener('click', () => {
+  if (isRunning()) stopTest();
   $('src').value = currentSrc;
   start();
 });
@@ -2088,8 +2549,84 @@ $('backBtn').addEventListener('click', () => {
     if (!confirm('测速正在进行，返回首页将停止当前测试。')) return;
     stopTest();
   }
+  if (retestCtrl) { retestCtrl.abort(); retestCtrl = null; }
   showView('home');
 });
+
+/* ---------- 全局悬停提示（挂在 body 下，彻底避免表格层叠上下文与滚动裁切遮挡） ---------- */
+function computeTipPosition(rect, tipW, tipH, vw, vh, minTop) {
+  const gap = 6, pad = 8;
+  const topLimit = Math.max(pad, minTop || pad);
+  const aboveY = rect.top - gap - tipH;
+  const belowY = rect.bottom + gap;
+  const fitsAbove = aboveY >= topLimit;
+  const fitsBelow = belowY + tipH <= vh - pad;
+  const below = !fitsAbove && fitsBelow;
+  const rawY = below ? belowY : (fitsAbove ? aboveY : Math.max(pad, Math.min(vh - tipH - pad, aboveY)));
+  const rawX = rect.left + rect.width / 2 - tipW / 2;
+  const x = Math.max(pad, Math.min(vw - tipW - pad, rawX));
+  const y = Math.max(pad, Math.min(vh - tipH - pad, rawY));
+  return { x: Math.round(x), y: Math.round(y), below };
+}
+
+const tipEl = $('tip');
+let tipTarget = null, tipTimer = null;
+
+function hideTip() {
+  clearTimeout(tipTimer);
+  tipTimer = null;
+  tipTarget = null;
+  if (!tipEl) return;
+  tipEl.classList.remove('show');
+  tipEl.setAttribute('aria-hidden', 'true');
+}
+
+function showTip(el) {
+  if (!tipEl || !el || !el.isConnected) return;
+  const text = el.getAttribute('data-tip');
+  if (!text) return;
+  tipEl.textContent = text;
+  const tipW = tipEl.offsetWidth, tipH = tipEl.offsetHeight;
+  const rect = el.getBoundingClientRect();
+  let minTop = 8;
+  const panel = el.closest('.table-panel');
+  if (panel) {
+    const thead = panel.querySelector('thead');
+    const topBound = thead ? thead.getBoundingClientRect().bottom : panel.getBoundingClientRect().top;
+    minTop = Math.max(8, topBound + 4);
+  }
+  const pos = computeTipPosition(rect, tipW, tipH, window.innerWidth, window.innerHeight, minTop);
+  const wasShown = tipEl.classList.contains('show');
+  tipEl.classList.toggle('below', pos.below);
+  if (!wasShown) void tipEl.offsetWidth;
+  tipEl.style.left = pos.x + 'px';
+  tipEl.style.top = pos.y + 'px';
+  tipEl.classList.add('show');
+  tipEl.setAttribute('aria-hidden', 'false');
+}
+
+document.addEventListener('pointerover', e => {
+  if (e.pointerType === 'touch') return;
+  const el = e.target && e.target.closest ? e.target.closest('[data-tip]') : null;
+  if (!el || el === tipTarget) return;
+  clearTimeout(tipTimer);
+  tipTarget = el;
+  tipTimer = setTimeout(() => {
+    if (tipTarget === el) showTip(el);
+  }, 180);
+});
+
+document.addEventListener('pointerout', e => {
+  if (!tipTarget) return;
+  const rel = e.relatedTarget && e.relatedTarget.closest ? e.relatedTarget.closest('[data-tip]') : null;
+  if (rel === tipTarget) return;
+  hideTip();
+});
+
+document.addEventListener('pointerdown', hideTip);
+document.addEventListener('keydown', hideTip);
+window.addEventListener('resize', hideTip);
+window.addEventListener('blur', hideTip);
 </script>
 </body>
 </html>

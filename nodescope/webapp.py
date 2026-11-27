@@ -14,21 +14,26 @@
     done   {ok, total}                          全部结束
 """
 
+import base64
 import contextlib
 import errno
 import json
 import re
 import subprocess
+import sys
 import threading
 import time
 import uuid
+from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
+import yaml
+
 from . import report, tester
 from .core import MihomoRunner, cleanup_stale, terminate_all
-from .subscription import dedupe_names, format_userinfo, load_nodes
+from .subscription import dedupe_names, format_userinfo, load_nodes, node_to_singbox, node_to_uri
 
 STATIC_DIR = Path(__file__).parent / "static"
 ICON_DIR = STATIC_DIR / "icons"
@@ -90,6 +95,129 @@ def _num_param(params, key, default, lo, hi, cast=float):
     return min(max(val, lo), hi)
 
 
+def _build_export_payload(fmt, raw_nodes):
+    """把已排序的可用节点列表导出为 clash / base64 / singbox 文本及下载元信息。"""
+    fmt = str(fmt or "clash").strip().lower()
+    if fmt not in ("clash", "base64", "singbox"):
+        raise ValueError(f"不支持的导出格式: {fmt!r}")
+    if not isinstance(raw_nodes, list) or not raw_nodes:
+        raise ValueError("没有可导出的节点")
+    date_str = datetime.now().strftime("%Y-%m-%d")
+
+    if fmt == "clash":
+        cfg = {
+            "proxies": raw_nodes,
+            "proxy-groups": [
+                {"name": "PROXIES", "type": "select", "proxies": [n["name"] for n in raw_nodes]}
+            ],
+        }
+        return {
+            "content": yaml.safe_dump(cfg, allow_unicode=True, sort_keys=False),
+            "filename": f"available_nodes_{date_str}.yaml",
+            "mime": "text/yaml;charset=utf-8",
+            "count": len(raw_nodes),
+            "skipped": 0,
+        }
+
+    if fmt == "base64":
+        uris = []
+        skipped = 0
+        for n in raw_nodes:
+            uri = node_to_uri(n)
+            if uri:
+                uris.append(uri)
+            else:
+                skipped += 1
+        return {
+            "content": base64.b64encode("\n".join(uris).encode("utf-8")).decode("utf-8"),
+            "filename": f"available_nodes_{date_str}.txt",
+            "mime": "text/plain;charset=utf-8",
+            "count": len(uris),
+            "skipped": skipped,
+        }
+
+    outbounds = []
+    tags = []
+    skipped = 0
+    for n in raw_nodes:
+        ob = node_to_singbox(n)
+        if ob:
+            outbounds.append(ob)
+            tags.append(ob["tag"])
+        else:
+            skipped += 1
+    cfg = {"outbounds": [{"type": "selector", "tag": "select", "outbounds": tags}, *outbounds]}
+    return {
+        "content": json.dumps(cfg, ensure_ascii=False, indent=2),
+        "filename": f"available_nodes_{date_str}.json",
+        "mime": "application/json;charset=utf-8",
+        "count": len(outbounds),
+        "skipped": skipped,
+    }
+
+
+def run_retest_stream(params, send_event, cancel_event=None):
+    """在空闲时流式复测单个节点：依次推送内核启动、探活、实时测速与最终结果。"""
+    node = params.get("node")
+    if not isinstance(node, dict) or not node.get("name"):
+        raise ValueError("缺少节点配置")
+
+    from .iface import detect_physical_iface
+
+    name = node["name"]
+    iface = detect_physical_iface()
+    no_speed = params.get("nospeed") == "1"
+    want_unlock = params.get("unlock") != "0"
+    speed_seconds = _num_param(params, "speed_seconds", 5, 1, 60)
+    max_mb = _num_param(params, "maxmb", None, 0, 10240) or None
+    probe_opts = {
+        "speed": False,
+        "samples": 3,
+        "timeout": 5,
+        "iface": iface,
+        "unlock": want_unlock,
+        "cancel_event": cancel_event,
+    }
+    speed_opts = {
+        "speed_seconds": speed_seconds,
+        "speed_threads": 8,
+        "max_download_mb": max_mb,
+        "timeout": 8,
+        "cancel_event": cancel_event,
+    }
+
+    send_event("status", {"message": f"复测「{name}」：启动内核…", "pct": 10})
+    with MihomoRunner([node], base_port=_next_base_port(1), iface=iface) as runner:
+        if _is_cancelled(cancel_event):
+            return
+        send_event("status", {"message": f"复测「{name}」：探测延迟与解锁…", "pct": 25})
+        res = tester.test_node(node, runner=runner, options=probe_opts)
+        if _is_cancelled(cancel_event):
+            return
+        send_event("probe", res)
+        if res.get("ok") and not no_speed and not _is_cancelled(cancel_event):
+            port = runner.ports.get(name)
+            if port:
+                send_event("status", {"message": f"复测「{name}」：下载测速中…", "pct": 35})
+                t0 = time.monotonic()
+
+                def _live_cb(mbps):
+                    if _is_cancelled(cancel_event):
+                        return
+                    ratio = min(1.0, (time.monotonic() - t0) / max(speed_seconds, 0.5))
+                    pct = round(35 + ratio * 60)
+                    send_event("speed_tick", {"name": name, "speed_mbps": mbps, "pct": pct})
+
+                try:
+                    mbps, _ = tester._run_speed(port, speed_opts, live_cb=_live_cb)
+                    res["speed_mbps"] = mbps
+                except Exception as e:  # noqa: BLE001 - 单节点复测测速失败只记 error
+                    res["error"] = f"测速失败: {e}"
+        res["_speed_tested"] = True
+        if not _is_cancelled(cancel_event):
+            send_event("done", {"result": res})
+
+
 def run_test_stream(params, send_event, cancel_event=None):
     """执行一次完整测试，结果通过 send_event(event, data_dict) 实时推送。"""
     src = str(params.get("src", ""))
@@ -101,37 +229,58 @@ def run_test_stream(params, send_event, cancel_event=None):
     # 前端「不限」会传空串；空串/None/0 表示不限流量，而不是回退到 30MB。
     max_mb = _num_param(params, "maxmb", None, 0, 10240) or None
     want_unlock = params.get("unlock") != "0"
-
-    disp_src = src if (len(src) < 60 and "\n" not in src) else (src.strip()[:40] + "... (文本内容)")
-    send_event("status", {"message": f"读取订阅: {disp_src}"})
-    # 输入来自浏览器：不允许当作本机文件路径读取
-    nodes, warns, userinfo = load_nodes(
-        src, on_status=lambda m: send_event("status", {"message": m}),
-        allow_file=False,
-    )
-    if not nodes:
-        send_event("error", {"message": "未解析到任何节点\n" + "\n".join(warns)})
-        return
-    dedupe_names(nodes)
+    resume_nodes = params.get("resume_nodes")
+    is_resume = isinstance(resume_nodes, list) and len(resume_nodes) > 0
+    skip_baseline = bool(params.get("skip_baseline"))
 
     from .iface import detect_physical_iface
     from .tester import check_fake_ip
 
-    fake_ip = check_fake_ip(nodes)
-    iface = detect_physical_iface()
+    pre_probed = None
+    if is_resume:
+        nodes = [n for n in resume_nodes if isinstance(n, dict) and n.get("name")]
+        if not nodes:
+            send_event("error", {"message": "没有待继续测速的节点"})
+            return
+        dedupe_names(nodes)
+        raw_probed = params.get("probed_results")
+        if isinstance(raw_probed, dict):
+            node_names = {n["name"] for n in nodes}
+            pre_probed = {
+                k: v for k, v in raw_probed.items()
+                if k in node_names and isinstance(v, dict) and v.get("ok")
+            } or None
+        iface = detect_physical_iface()
+        send_event("status", {"message": f"继续测速：剩余 {len(nodes)} 个节点…"})
+    else:
+        disp_src = src if (len(src) < 60 and "\n" not in src) else (src.strip()[:40] + "... (文本内容)")
+        send_event("status", {"message": f"读取订阅: {disp_src}"})
+        # 输入来自浏览器：不允许当作本机文件路径读取
+        nodes, warns, userinfo = load_nodes(
+            src, on_status=lambda m: send_event("status", {"message": m}),
+            allow_file=False,
+        )
+        if not nodes:
+            send_event("error", {"message": "未解析到任何节点\n" + "\n".join(warns)})
+            return
+        dedupe_names(nodes)
 
-    send_event("meta", {
-        "count": len(nodes),
-        "nodes": [{"name": n["name"], "type": n.get("type", "?"),
-                   "server": n.get("server", "?"), "port": n.get("port", 0)}
-                  for n in nodes],
-        "raw_nodes": nodes,
-        "userinfo": format_userinfo(userinfo),
-        "warns": warns,
-        "fake_ip": fake_ip,
-        "tun_iface": iface,
-        "show_unlock": want_unlock,
-    })
+        fake_ip = check_fake_ip(nodes)
+        iface = detect_physical_iface()
+
+        send_event("meta", {
+            "count": len(nodes),
+            "nodes": [{"name": n["name"], "type": n.get("type", "?"),
+                       "server": n.get("server", "?"), "port": n.get("port", 0),
+                       "uri": node_to_uri(n) or ""}
+                      for n in nodes],
+            "raw_nodes": nodes,
+            "userinfo": format_userinfo(userinfo),
+            "warns": warns,
+            "fake_ip": fake_ip,
+            "tun_iface": iface,
+            "show_unlock": want_unlock,
+        })
 
     # 本机带宽基线（直连、不经节点）：与 mihomo 启动并行测，
     # 但在节点测速开始前完成，避免抢带宽拉低节点速度；
@@ -161,7 +310,9 @@ def run_test_stream(params, send_event, cancel_event=None):
 
     if not TEST_LOCK.acquire(timeout=0.05):
         send_event("status", {"message": "等待上一次测试结束…"})
-        TEST_LOCK.acquire()
+        while not TEST_LOCK.acquire(timeout=0.2):
+            if _is_cancelled(cancel_event):
+                return
     ctx = None
     results = []
     bw_thread = None
@@ -169,7 +320,7 @@ def run_test_stream(params, send_event, cancel_event=None):
         if _is_cancelled(cancel_event):
             return
         send_event("status", {"message": "启动 mihomo 内核..."})
-        if not no_speed:
+        if not no_speed and not (is_resume and skip_baseline):
             bw_thread = threading.Thread(target=_baseline, daemon=True)
             bw_thread.start()
         # 「只测延迟」仍启动 mihomo，才能测经节点的 HTTP 延迟
@@ -204,6 +355,7 @@ def run_test_stream(params, send_event, cancel_event=None):
             status_cb=on_status,
             on_speed_start=on_speed_start,
             on_speed_tick=on_speed_tick,
+            pre_probed=pre_probed,
         )
     finally:
         if ctx is not None:
@@ -244,37 +396,52 @@ class Handler(BaseHTTPRequestHandler):
             return False
         return True
 
+    def _read_json_body(self):
+        ctype = (self.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+        if ctype != "application/json":
+            self._send_json(415, {"error": "Content-Type 必须是 application/json"})
+            return None
+        try:
+            content_len = int(self.headers.get("Content-Length", 0))
+        except ValueError:
+            content_len = -1
+        if not 0 <= content_len <= MAX_TASK_BODY:
+            self._send_json(413, {"error": "请求体过大或长度非法"})
+            return None
+        raw_body = self.rfile.read(content_len).decode("utf-8", errors="replace")
+        try:
+            params = json.loads(raw_body)
+        except ValueError:
+            self._send_json(400, {"error": "Invalid JSON body"})
+            return None
+        if not isinstance(params, dict):
+            self._send_json(400, {"error": "Invalid JSON body"})
+            return None
+        return params
+
     def do_POST(self):
         if not self._check_origin():
             return
         parsed = urlparse(self.path)
-        if parsed.path == "/api/task":
-            # 只收 JSON：跨站表单只能发 text/plain 等「简单请求」，据此再挡一层
-            ctype = (self.headers.get("Content-Type") or "").split(";")[0].strip().lower()
-            if ctype != "application/json":
-                self._send_json(415, {"error": "Content-Type 必须是 application/json"})
+        if parsed.path in ("/api/task", "/api/export", "/api/retest"):
+            params = self._read_json_body()
+            if params is None:
                 return
-            try:
-                content_len = int(self.headers.get("Content-Length", 0))
-            except ValueError:
-                content_len = -1
-            if not 0 <= content_len <= MAX_TASK_BODY:
-                self._send_json(413, {"error": "请求体过大或长度非法"})
-                return
-            raw_body = self.rfile.read(content_len).decode("utf-8", errors="replace")
-            try:
-                params = json.loads(raw_body)
-            except ValueError:
-                self._send_json(400, {"error": "Invalid JSON body"})
-                return
-            if not isinstance(params, dict):
-                self._send_json(400, {"error": "Invalid JSON body"})
-                return
-            _clean_expired_tasks()
-            task_id = uuid.uuid4().hex
-            with TASKS_LOCK:
-                TASKS[task_id] = {"params": params, "created_at": time.time()}
-            self._send_json(200, {"taskId": task_id})
+            if parsed.path == "/api/task":
+                _clean_expired_tasks()
+                task_id = uuid.uuid4().hex
+                with TASKS_LOCK:
+                    TASKS[task_id] = {"params": params, "created_at": time.time()}
+                self._send_json(200, {"taskId": task_id})
+            elif parsed.path == "/api/export":
+                try:
+                    out = _build_export_payload(params.get("format"), params.get("nodes"))
+                except ValueError as e:
+                    self._send_json(400, {"error": str(e)})
+                    return
+                self._send_json(200, out)
+            else:
+                self._serve_retest_stream(params)
         else:
             self._send_json(404, {"error": "not found"})
 
@@ -338,7 +505,7 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
-    def _serve_stream(self, params):
+    def _serve_sse_loop(self, runner_fn, params):
         cancel_event = threading.Event()
         with _ACTIVE_LOCK:
             _ACTIVE_CANCELS.add(cancel_event)
@@ -385,7 +552,7 @@ class Handler(BaseHTTPRequestHandler):
         threading.Thread(target=heartbeat, daemon=True).start()
 
         try:
-            run_test_stream(params, send_event, cancel_event)
+            runner_fn(params, send_event, cancel_event)
         except (BrokenPipeError, ConnectionResetError):
             cancel_event.set()
         except Exception as e:  # noqa: BLE001 - 任何异常都推给前端
@@ -396,6 +563,22 @@ class Handler(BaseHTTPRequestHandler):
             cancel_event.set()
             with _ACTIVE_LOCK:
                 _ACTIVE_CANCELS.discard(cancel_event)
+
+    def _serve_stream(self, params):
+        self._serve_sse_loop(run_test_stream, params)
+
+    def _serve_retest_stream(self, params):
+        node = params.get("node")
+        if not isinstance(node, dict) or not node.get("name"):
+            self._send_json(400, {"error": "缺少节点配置"})
+            return
+        if not TEST_LOCK.acquire(timeout=3.0):
+            self._send_json(409, {"error": "当前有测试正在进行，请稍后再复测"})
+            return
+        try:
+            self._serve_sse_loop(run_retest_stream, params)
+        finally:
+            TEST_LOCK.release()
 
 
 # 进行中测试会话的取消信号，服务停止时统一置位，让测试线程尽快收尾
@@ -413,11 +596,40 @@ def shutdown_all():
 
 
 class _Server(ThreadingHTTPServer):
-    allow_reuse_address = True
+    allow_reuse_address = sys.platform != "win32"
 
 
 def _listener_hint(port):
     """查占用该端口的进程，失败则返回 None。"""
+    if sys.platform == "win32":
+        try:
+            out = subprocess.check_output(
+                ["netstat", "-ano", "-p", "TCP"],
+                text=True, encoding="mbcs", errors="replace", stderr=subprocess.DEVNULL,
+            )
+            pid = None
+            suffix = f":{port}"
+            for ln in out.splitlines():
+                parts = ln.split()
+                if len(parts) >= 5 and parts[1].endswith(suffix) and parts[3].upper() == "LISTENING":
+                    pid = parts[4]
+                    break
+            if not pid:
+                return None
+            try:
+                tl = subprocess.check_output(
+                    ["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
+                    text=True, encoding="mbcs", errors="replace", stderr=subprocess.DEVNULL,
+                ).strip()
+                if tl and tl.startswith('"'):
+                    name = tl.split('"', 2)[1]
+                    if name:
+                        return f"{name} (pid {pid})"
+            except (OSError, subprocess.CalledProcessError, IndexError):
+                pass
+            return f"pid {pid}"
+        except (OSError, subprocess.CalledProcessError):
+            return None
     try:
         out = subprocess.check_output(
             ["lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN"],
@@ -449,6 +661,9 @@ def serve(port=8765, auto_port=True):
     server = None
     chosen = port
     attempts = range(port, port + 20) if auto_port else (port,)
+    addr_in_use = {errno.EADDRINUSE, getattr(errno, "WSAEADDRINUSE", errno.EADDRINUSE)}
+    if sys.platform == "win32":
+        addr_in_use.add(getattr(errno, "WSAEACCES", -1))
     for candidate in attempts:
         try:
             server = _Server((host, candidate), Handler)
@@ -456,7 +671,7 @@ def serve(port=8765, auto_port=True):
             break
         except OSError as e:
             last_err = e
-            if e.errno != errno.EADDRINUSE:
+            if e.errno not in addr_in_use and getattr(e, "winerror", None) not in (10048, 10013):
                 raise
     if server is None:
         raise OSError(_bind_error(port)) from last_err

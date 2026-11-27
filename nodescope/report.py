@@ -39,20 +39,22 @@ IP_RISK_NAMES = {"low": "低", "mid": "中", "high": "高"}
 
 
 def ip_label(q):
-    """IP 质量的简短标签：「家宽」「机房」「机房·代理」；无数据返回 None。"""
+    """IP 质量的简短标签：「家宽」「移动」「机房」「机房·代理」「未确认」；无数据返回 None。"""
     if not isinstance(q, dict) or not q.get("type"):
         return None
     return q["type"] + ("·代理" if q.get("proxy") else "")
 
 
-def ip_tip(q):
-    """IP 质量的悬停说明：风险等级 + ISP + ASN。"""
+def ip_tip(q, ip=None):
+    """IP 质量的悬停说明：风险等级 + 状态说明 + ISP + 出口 IP（无 IP 时回退 ASN）。"""
     if not isinstance(q, dict):
-        return ""
+        return str(ip) if ip else ""
     parts = [f"风险{IP_RISK_NAMES.get(q.get('risk'), '?')}"]
+    if q.get("type") == "未确认":
+        parts.append("仅单源未标机房，未复核是否家宽")
     if q.get("proxy"):
         parts.append("已被标记为代理/VPN")
-    parts += [x for x in (q.get("isp"), q.get("asn")) if x]
+    parts += [x for x in (q.get("isp"), ip or q.get("asn")) if x]
     return " | ".join(parts)
 
 
@@ -60,7 +62,7 @@ def _ip_text(q):
     label = ip_label(q)
     if not label:
         return Text("-", style="dim")
-    style = {"low": "green", "high": "yellow"}.get(q.get("risk"), "")
+    style = {"low": "green", "mid": "yellow", "high": "red"}.get(q.get("risk"), "")
     return Text(label, style=style)
 
 
@@ -359,8 +361,8 @@ def export_html(results, path, source=None, userinfo=None, show_unlock=False):
         if has_ip:
             q = r.get("ip_quality")
             label = ip_label(q)
-            ip_cls = {"low": "good", "high": "mid"}.get((q or {}).get("risk"), "plain")
-            ip_td = (f'<td><span data-tip="{esc(ip_tip(q))}">{_badge(ip_cls, esc(label))}</span></td>'
+            ip_cls = {"low": "good", "mid": "mid", "high": "bad"}.get((q or {}).get("risk"), "plain")
+            ip_td = (f'<td><span data-tip="{esc(ip_tip(q, r.get("ip")))}">{_badge(ip_cls, esc(label))}</span></td>'
                      if label else '<td class="dim">-</td>')
         rows.append(
             "<tr>"
@@ -389,7 +391,7 @@ def export_html(results, path, source=None, userinfo=None, show_unlock=False):
 
     sort_svg = '<svg class="sort-arrow" viewBox="0 0 10 10" fill="currentColor" aria-hidden="true"><path d="M5 2.2 8.6 7.4H1.4Z"/></svg>'
     th_unlock = f'<th data-k="unlock" tabindex="0" aria-sort="none">解锁{sort_svg}</th>' if has_unlock else ''
-    th_ip = f'<th data-k="ip" tabindex="0" aria-sort="none" title="出口 IP 类型与风险，悬停看 ISP / ASN">IP{sort_svg}</th>' if has_ip else ''
+    th_ip = f'<th data-k="ip" tabindex="0" aria-sort="none" title="出口 IP 类型与风险：家宽/移动需经双源核验非机房，未复核标为未确认。悬停看 ISP / 出口 IP">IP{sort_svg}</th>' if has_ip else ''
     page = f"""<!DOCTYPE html>
 <html lang="zh-CN">
 <head>

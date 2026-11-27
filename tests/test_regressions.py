@@ -58,9 +58,16 @@
 48. iface 缓存并发 / UDP 53 —— 并发线程同时查同一域名各发一遍 DNS；UDP 53 被屏蔽时每个新域名都先等两轮超时
 49. static/index.html 导出 —— 「导出可用节点」按原始顺序，而 CLI 按速度排名
 50. static/index.html 带宽基线 —— 直连基线偏低（直连国际线路受限）时，所有节点都被标成「≈ 本机带宽上限」
-51. tester 解锁流量        —— Netflix / TikTok 整页下载，每个节点多耗数百 KB 订阅流量；Web 端无法关闭解锁检测
+51. tester 解锁流量        —— Netflix / TikTok 整页下载，每个节点多耗数百 KB 订阅流量
 52. tester._download_one 爬坡段 —— 慢启动计入平均速率，流量上限提前停时快节点被系统性低估
 53. start.sh / start.ps1   —— 下载的内核不校验 SHA256，经第三方加速站时等于直接执行对方给的二进制
+54. static/index.html 悬停提示 —— 多行同时测速时 tr.testing-node 创建独立层叠上下文，首行向下弹出的 ::after 提示被第二行遮挡；改为挂在 body 下的全局 fixed 浮层
+55. tester.ip_quality 假家宽 —— 仅凭 ip-api 未标 hosting 就一律标成「家宽」，xTom 等小众机房被大量误判；改为本地机房特征 + ipquery.io 按需双源核验，未复核时标「未确认」
+56. static/index.html 排序与测速置顶 —— 点击列排序后 pinTestingRow 失效且无法取消排序；改为测速中始终置顶、下方按列排序、测完自动平滑归位并支持三态表头取消排序
+57. IP 列补全/风险着色/悬停出口 IP 及测速置顶行编号 —— Cloudflare Trace 兜底不查 ipquery 导致 IP 列显示「-」；测速置顶行冻结旧号导致重号；IP 风险着色对齐延迟三档且悬停第三段改显示出口 IP
+58. Windows 端口检测 / 探活并行 / 多词搜索、多格式导出、单节点复测与删除深色主题
+59. 单节点复测体验 —— 原阻塞 JSON 接口无进度且完成后 refreshRanks 导致节点跳到首行；改为 SSE 实时推送进度并原地更新不跳行
+60. 断点续测（继续测速） —— 手动停止后仅支持全量重测；新增 test_all(pre_probed) 与 Web 端「继续测速」仅测剩余节点、跳过已探活节点重复探活
 """
 
 import base64
@@ -1274,7 +1281,8 @@ class TestFindLocalBinary(unittest.TestCase):
             core.LOCAL_BIN_DIR = d
             core.shutil.which = lambda name: None
             try:
-                self.assertIsNone(core.find_binary(), "没有执行权限的文件不能当内核")
+                if sys.platform != "win32":
+                    self.assertIsNone(core.find_binary(), "没有执行权限的文件不能当内核")
                 os.chmod(path, 0o755)
                 self.assertEqual(core.find_binary(), path)
             finally:
@@ -1790,18 +1798,18 @@ class TestWebProgressCountsFailedSpeed(unittest.TestCase):
     @unittest.skipUnless(shutil.which("node"), "需要 node 才能执行前端脚本")
     def test_failed_speed_counts_as_done(self):
         script = (
-            "const els = {}; const $ = id => els[id] || (els[id] = {style: {}, textContent: ''});\n"
+            "const els = {}; const $ = id => els[id] || (els[id] = {style: {}, textContent: '', classList: {remove(){}, add(){}, toggle(){}}});\n"
             "let testNoSpeed = false;\n"
             "const rows = {a: {_done: true, ok: true, speed_mbps: 50, _speed_tested: true},\n"
             "              b: {_done: true, ok: true, speed_mbps: null, _speed_tested: true},\n"
             "              c: {_done: true, ok: false}};\n"
             "const order = ['a', 'b', 'c'];\n"
             + self._fn() +
-            "\nsetProgress(3, 3, 2); process.stdout.write(els.barFill.style.width + '|' + els.progressText.textContent);"
+            "\nsetProgress(3, 3, 2); process.stdout.write(els.barFill.style.transform + '|' + els.progressText.textContent);"
         )
         out = subprocess.run(["node", "-e", script], capture_output=True, text=True, timeout=10, check=True).stdout
-        width, text = out.split("|")
-        self.assertEqual(width, "100%")
+        transform, text = out.split("|")
+        self.assertEqual(transform, "scaleX(1)")
         self.assertEqual(text, "测速全部完成")
 
 
@@ -2075,12 +2083,6 @@ class TestUnlockTraffic(unittest.TestCase):
         res, _ = self._run("netflix", [b"<html><title>Netflix</title>", b"<h1>Oh no!</h1></html>"])
         self.assertFalse(res["netflix"], "错误页仍要识别出来")
 
-    def test_web_can_disable_unlock(self):
-        with open(TestBaselineTrust.HTML, encoding="utf-8") as f:
-            src = f.read()
-        self.assertIn('id="noUnlock"', src)
-        self.assertRegex(src, r"unlock: \$\('noUnlock'\)\.checked \? '0' : '1'")
-
 
 class TestSteadyWindow(unittest.TestCase):
     """52：计速要剔除起步爬坡段，否则流量上限提前停时快节点被系统性低估。"""
@@ -2143,6 +2145,631 @@ class TestKernelDownloadChecksum(unittest.TestCase):
         self.assertLess(body.index("Get-ExpectedSha256 $version"), body.index("Expand-Archive"))
         api_line = next(ln for ln in src.splitlines() if "api.github.com/repos" in ln)
         self.assertNotIn("NS_GITHUB_PROXY", api_line)
+
+
+class TestFloatingTooltip(unittest.TestCase):
+    """54：悬停提示改为挂在 body 下的全局 fixed 浮层，避免被相邻测速行层叠上下文或表头/滚动容器遮挡。"""
+
+    HTML = os.path.join(os.path.dirname(webapp.__file__), "static", "index.html")
+
+    def _read_html(self):
+        with open(self.HTML, encoding="utf-8") as f:
+            return f.read()
+
+    def test_tooltip_mounted_as_fixed_body_element(self):
+        src = self._read_html()
+        self.assertNotIn("[data-tip]::after", src)
+        self.assertIn('<div id="tip" class="tip"', src)
+        self.assertRegex(src, r"\.tip\s*\{[^}]*position:\s*fixed")
+        # 浮层容器必须位于 .app 外部（作为 body 的直接子节点）
+        self.assertGreater(src.index('<div id="tip" class="tip"'), src.index("</div>\n<div id=\"tip\""))
+
+    @unittest.skipUnless(shutil.which("node"), "需要 node 才能执行前端脚本")
+    def test_compute_tip_position(self):
+        src = self._read_html()
+        start = src.index("function computeTipPosition(")
+        end = src.index("\nconst tipEl =", start)
+        fn_src = src[start:end]
+        script = (
+            f"{fn_src}\n"
+            "const cases = {"
+            "  middle: computeTipPosition({left: 300, width: 20, top: 260, bottom: 280}, 100, 24, 1200, 800, 180),"
+            "  firstRow: computeTipPosition({left: 300, width: 20, top: 184, bottom: 204}, 100, 24, 1200, 800, 180),"
+            "  leftEdge: computeTipPosition({left: 2, width: 20, top: 260, bottom: 280}, 100, 24, 1200, 800, 180),"
+            "  rightEdge: computeTipPosition({left: 1180, width: 20, top: 260, bottom: 280}, 100, 24, 1200, 800, 180),"
+            "  tightView: computeTipPosition({left: 300, width: 20, top: 20, bottom: 40}, 100, 24, 1200, 50, 20)"
+            "};"
+            "process.stdout.write(JSON.stringify(cases));"
+        )
+        out = subprocess.run(["node", "-e", script], capture_output=True, text=True, timeout=10, check=True).stdout
+        cases = json.loads(out)
+
+        # 普通中间行向上弹出
+        self.assertFalse(cases["middle"]["below"])
+        self.assertEqual(cases["middle"]["y"], 260 - 6 - 24)
+        self.assertEqual(cases["middle"]["x"], 300 + 10 - 50)
+
+        # 紧贴吸顶表头下方的行（包括滚动/筛选后的首行）向下弹出
+        self.assertTrue(cases["firstRow"]["below"])
+        self.assertEqual(cases["firstRow"]["y"], 204 + 6)
+
+        # 靠左/右边缘时横向夹紧到 [8, vw - tipW - 8]
+        self.assertEqual(cases["leftEdge"]["x"], 8)
+        self.assertEqual(cases["rightEdge"]["x"], 1200 - 100 - 8)
+
+        # 极矮视口纵向夹紧在视口内
+        self.assertGreaterEqual(cases["tightView"]["y"], 8)
+        self.assertLessEqual(cases["tightView"]["y"], 50 - 24 - 8)
+
+
+class TestResidentialIpVerification(unittest.TestCase):
+    """55：假家宽误判 —— 本地机房特征 + api.ipquery.io 按需双源核验，未复核标「未确认」。"""
+
+    def setUp(self):
+        with tester._IPQUERY_LOCK:
+            tester._IPQUERY_CACHE.clear()
+        self._orig_get = tester.requests.get
+
+    def tearDown(self):
+        tester.requests.get = self._orig_get
+        with tester._IPQUERY_LOCK:
+            tester._IPQUERY_CACHE.clear()
+
+    def test_hosting_org_caught_without_extra_request(self):
+        calls = []
+
+        class _Resp:
+            status_code = 200
+
+            def json(self):
+                return {
+                    "status": "success", "country": "日本", "countryCode": "JP", "city": "东京",
+                    "query": "146.19.163.75", "isp": "xTom Japan Corporation",
+                    "org": "xTom Japan Corporation", "as": "AS3258 xTom Japan Corporation",
+                    "mobile": False, "proxy": False, "hosting": False,
+                }
+
+        def fake_get(url, **kwargs):
+            calls.append(url)
+            return _Resp()
+
+        tester.requests.get = fake_get
+        geo = tester.fetch_node_geo(10000)
+        self.assertEqual(len(calls), 1, "本地特征命中机房时不应再发二次核验请求")
+        self.assertEqual(geo["quality"]["type"], "机房")
+        self.assertEqual(geo["quality"]["risk"], "mid")
+
+        # 真实家宽/运营商名称不能被本地特征误杀
+        for legit in ("NTT Communications Corporation", "SoftBank Corp.", "Comcast Cable Communications"):
+            self.assertFalse(tester._is_hosting_org(legit), f"{legit} 不应被误判为机房")
+
+    def test_candidate_residential_verified_by_ipquery_and_cached(self):
+        ipquery_calls = []
+
+        class _Resp:
+            def __init__(self, payload):
+                self.status_code = 200
+                self._payload = payload
+
+            def json(self):
+                return self._payload
+
+        def fake_get(url, **kwargs):
+            if "ip-api.com" in url:
+                ip = "203.0.113.10" if fake_get.mode == "dc" else "73.162.100.1"
+                isp = "Mystery Network LLC" if fake_get.mode == "dc" else "Comcast Cable"
+                return _Resp({
+                    "status": "success", "country": "美国", "countryCode": "US", "city": "洛杉矶",
+                    "query": ip, "isp": isp, "org": isp, "as": "AS7922",
+                    "mobile": False, "proxy": False, "hosting": False,
+                })
+            ipquery_calls.append(url)
+            if "203.0.113.10" in url:
+                return _Resp({"risk": {"is_datacenter": True, "is_vpn": True, "is_proxy": False, "is_tor": False, "is_mobile": False}})
+            return _Resp({"risk": {"is_datacenter": False, "is_vpn": False, "is_proxy": False, "is_tor": False, "is_mobile": False}})
+
+        tester.requests.get = fake_get
+
+        # 场景1：ip-api 漏标的未知机房 + VPN → 被 ipquery 纠偏为「机房·代理」高风险
+        fake_get.mode = "dc"
+        geo_dc = tester.fetch_node_geo(10000)
+        self.assertEqual(geo_dc["quality"]["type"], "机房")
+        self.assertTrue(geo_dc["quality"]["proxy"])
+        self.assertEqual(geo_dc["quality"]["risk"], "high")
+
+        # 场景2：真实家宽经 ipquery 核验后判为「家宽」低风险，且同 IP 第二次查询命中缓存
+        fake_get.mode = "res"
+        geo_res1 = tester.fetch_node_geo(10000)
+        geo_res2 = tester.fetch_node_geo(10001)
+        self.assertEqual(geo_res1["quality"]["type"], "家宽")
+        self.assertEqual(geo_res1["quality"]["risk"], "low")
+        self.assertEqual(geo_res2["quality"], geo_res1["quality"])
+        self.assertEqual(ipquery_calls.count("https://api.ipquery.io/73.162.100.1?format=json"), 1)
+
+    def test_unverified_fallback_does_not_claim_residential(self):
+        class _Resp:
+            status_code = 200
+
+            def json(self):
+                return {
+                    "status": "success", "country": "美国", "countryCode": "US", "city": "纽约",
+                    "query": "198.51.100.9", "isp": "Unknown Regional ISP",
+                    "org": "Unknown Regional ISP", "as": "AS64500",
+                    "mobile": False, "proxy": False, "hosting": False,
+                }
+
+        def fake_get(url, **kwargs):
+            if "ip-api.com" in url:
+                return _Resp()
+            raise TimeoutError("ipquery timeout")
+
+        tester.requests.get = fake_get
+        geo = tester.fetch_node_geo(10000)
+        q = geo["quality"]
+        self.assertEqual(q["type"], "未确认")
+        self.assertEqual(q["risk"], "mid")
+        self.assertIn("未复核是否家宽", report.ip_tip(q))
+
+        with open(TestFloatingTooltip.HTML, encoding="utf-8") as f:
+            html_src = f.read()
+        self.assertIn("仅单源未标机房，未复核是否家宽", html_src)
+
+
+class TestSortKeepsTestingPinned(unittest.TestCase):
+    """56：排序期间测速中行始终置顶，测完自动归位，表头支持三态取消排序。"""
+
+    HTML = os.path.join(os.path.dirname(webapp.__file__), "static", "index.html")
+
+    def _read_html(self):
+        with open(self.HTML, encoding="utf-8") as f:
+            return f.read()
+
+    def test_pin_and_live_sort_hooks(self):
+        src = self._read_html()
+        pin_fn = src[src.index("function pinTestingRow("):src.index("/* ---------- 排序 ---------- */")]
+        self.assertNotIn("sortState.key", pin_fn, "排序期间测速中行也必须置顶")
+        update_fn = src[src.index("function updateRow("):src.index("/* ---------- 减少动态效果")]
+        self.assertIn("scheduleLiveSort()", update_fn, "节点更新完成后应自动触发排序归位")
+        self.assertIn("lastTesting.after(tr)", update_fn, "未排序模式下测完节点应滑到所有测速中行下方")
+
+    @unittest.skipUnless(shutil.which("node"), "需要 node 才能执行前端脚本")
+    def test_three_state_sort_and_partition(self):
+        src = self._read_html()
+        start = src.index("const defaultSortAsc =")
+        end = src.index("\nfunction updateSortIndicators()", start)
+        fn_src = src[start:end]
+        script = (
+            f"{fn_src}\n"
+            "let s = { key: null, asc: true };"
+            "const speedCycle = [];"
+            "for (let i = 0; i < 3; i++) { s = nextSortState(s, 'speed'); speedCycle.push({...s}); }"
+            "const latCycle = [];"
+            "for (let i = 0; i < 3; i++) { s = nextSortState(s, 'latency'); latCycle.push({...s}); }"
+            "s = nextSortState({ key: 'speed', asc: false }, 'latency');"
+            "const switchCol = {...s};"
+            "const mk = (id, v, testing) => ({ id, v, classList: { contains: c => testing && c === 'testing-node' } });"
+            "const rows = [mk('a', 10, false), mk('t1', 5, true), mk('b', 50, false), mk('t2', 20, true)];"
+            "const p1 = sortRowsKeepingTesting(rows, (x, y) => y.v - x.v);"
+            "const rowsAfterDone = [mk('a', 10, false), mk('t1', 35, false), mk('b', 50, false), mk('t2', 20, true)];"
+            "const p2 = sortRowsKeepingTesting(rowsAfterDone, (x, y) => y.v - x.v);"
+            "process.stdout.write(JSON.stringify({"
+            "  speedCycle, latCycle, switchCol,"
+            "  p1Testing: p1.testing.map(r => r.id), p1Rest: p1.rest.map(r => r.id),"
+            "  p2Testing: p2.testing.map(r => r.id), p2Rest: p2.rest.map(r => r.id)"
+            "}));"
+        )
+        out = subprocess.run(["node", "-e", script], capture_output=True, text=True, timeout=10, check=True).stdout
+        res = json.loads(out)
+
+        self.assertEqual(res["speedCycle"], [
+            {"key": "speed", "asc": False},
+            {"key": "speed", "asc": True},
+            {"key": None, "asc": True},
+        ])
+        self.assertEqual(res["latCycle"], [
+            {"key": "latency", "asc": True},
+            {"key": "latency", "asc": False},
+            {"key": None, "asc": True},
+        ])
+        self.assertEqual(res["switchCol"], {"key": "latency", "asc": True})
+        self.assertEqual(res["p1Testing"], ["t1", "t2"])
+        self.assertEqual(res["p1Rest"], ["b", "a"])
+        # t1 测完去掉 testing-node 后，自动归位到 b(50) 与 a(10) 之间；仍在测的 t2 继续置顶
+        self.assertEqual(res["p2Testing"], ["t2"])
+        self.assertEqual(res["p2Rest"], ["b", "t1", "a"])
+
+
+class TestIpDisplayAndTestingRank(unittest.TestCase):
+    """57：Trace 兜底补查 IP 质量、三档风险着色、悬停显示出口 IP、测速置顶行显示 '-' 不撞号。"""
+
+    def setUp(self):
+        with tester._IPQUERY_LOCK:
+            tester._IPQUERY_CACHE.clear()
+        self._orig_get = tester.requests.get
+
+    def tearDown(self):
+        tester.requests.get = self._orig_get
+        with tester._IPQUERY_LOCK:
+            tester._IPQUERY_CACHE.clear()
+
+    def test_cloudflare_trace_fallback_fetches_ipquery_quality(self):
+        class _TraceResp:
+            status_code = 200
+            text = "ip=146.19.163.75\nloc=JP\ncolo=NRT\n"
+
+        class _IpqueryResp:
+            status_code = 200
+
+            def json(self):
+                return {
+                    "isp": {"asn": "AS3258", "org": "xTom Japan Corporation", "isp": "xTom Japan Corporation"},
+                    "risk": {"is_datacenter": True, "is_vpn": False, "is_proxy": False, "is_tor": False, "is_mobile": False},
+                }
+
+        def fake_get(url, **kwargs):
+            if "ip-api.com" in url:
+                raise TimeoutError("ip-api timeout")
+            if "cloudflare.com/cdn-cgi/trace" in url:
+                return _TraceResp()
+            if "api.ipquery.io/146.19.163.75" in url:
+                return _IpqueryResp()
+            raise AssertionError(f"unexpected url: {url}")
+
+        tester.requests.get = fake_get
+        geo = tester.fetch_node_geo(10000)
+        self.assertEqual(geo["ip"], "146.19.163.75")
+        self.assertIsNotNone(geo["quality"])
+        self.assertEqual(geo["quality"]["type"], "机房")
+        self.assertEqual(geo["quality"]["risk"], "mid")
+
+    def test_ip_risk_colors_and_tip_shows_exit_ip(self):
+        with open(TestFloatingTooltip.HTML, encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn(".ipq-low { color: var(--good); }", src)
+        self.assertIn(".ipq-mid { color: var(--mid); }", src)
+        self.assertIn(".ipq-high { color: var(--bad); }", src)
+        self.assertIn("ipq.risk === 'mid' ? PNG.mid : ipq.risk === 'high' ? PNG.bad", src)
+        self.assertIn("renderIp(row.ip_quality, row.ip)", src)
+        self.assertIn("ip || q.asn", src)
+        self.assertIn("if (row._tr.cells[0]) row._tr.cells[0].textContent = '-';", src)
+        self.assertIn("if (tr.cells[0]) tr.cells[0].textContent = '-';", src)
+        self.assertEqual(
+            report.ip_tip({"type": "机房", "proxy": False, "risk": "mid", "isp": "xTom", "asn": "AS3258"}, ip="146.19.163.75"),
+            "风险中 | xTom | 146.19.163.75",
+        )
+
+
+class TestEnhancementsBatch(unittest.TestCase):
+    """58：删除深色主题、多词组合搜索、多格式导出接口与 Geo/解锁并行。"""
+
+    def test_no_dark_theme_css(self):
+        with open(TestFloatingTooltip.HTML, encoding="utf-8") as f:
+            src = f.read()
+        self.assertNotIn("prefers-color-scheme: dark", src)
+        self.assertNotIn('data-theme="dark"', src)
+        self.assertNotIn('id="includeFilter"', src)
+        self.assertNotIn('id="noUnlock"', src)
+
+    def test_export_endpoint_formats(self):
+        sample_nodes = [
+            {"name": "HK-1", "type": "ss", "server": "1.2.3.4", "port": 8388,
+             "cipher": "aes-256-gcm", "password": "pw"},
+            {"name": "Any", "type": "anytls", "server": "5.6.7.8", "port": 443, "password": "pw2"},
+        ]
+        srv = webapp._Server(("127.0.0.1", 0), webapp.Handler)
+        port = srv.server_address[1]
+        t = threading.Thread(target=srv.serve_forever, daemon=True)
+        t.start()
+        try:
+            for fmt, ext in (("clash", ".yaml"), ("base64", ".txt"), ("singbox", ".json")):
+                conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+                conn.request(
+                    "POST", "/api/export",
+                    body=json.dumps({"format": fmt, "nodes": sample_nodes}),
+                    headers={"Host": f"127.0.0.1:{port}", "Content-Type": "application/json"},
+                )
+                resp = conn.getresponse()
+                data = json.loads(resp.read().decode("utf-8"))
+                conn.close()
+                self.assertEqual(resp.status, 200)
+                self.assertTrue(data["filename"].endswith(ext))
+                if fmt == "clash":
+                    self.assertIn("proxies:", data["content"])
+                elif fmt == "base64":
+                    decoded = base64.b64decode(data["content"]).decode("utf-8")
+                    self.assertIn("ss://", decoded)
+                else:
+                    self.assertIn('"outbounds"', data["content"])
+        finally:
+            srv.shutdown()
+            srv.server_close()
+
+    def test_parallel_geo_and_unlock_with_region_guard(self):
+        class Runner:
+            ports = {"n1": 10000}
+            rejected = {}
+
+        orig = tester.tcp_ping, tester.http_latency, tester.fetch_node_geo, tester.check_unlocks
+        tester.tcp_ping = lambda *a, **kw: [10.0]
+        tester.http_latency = lambda *a, **kw: 20.0
+
+        def slow_geo(*a, **kw):
+            time.sleep(0.25)
+            return {"ip": "1.2.3.4", "country": "香港", "country_code": "HK", "quality": None}
+
+        def slow_unlock(*a, **kw):
+            time.sleep(0.25)
+            return {"chatgpt": True, "claude": True, "gemini": True, "youtube": True,
+                    "netflix": True, "disney": True, "tiktok": True, "bilibili": True}
+
+        tester.fetch_node_geo = slow_geo
+        tester.check_unlocks = slow_unlock
+        try:
+            t0 = time.monotonic()
+            res = tester.test_node({"name": "n1", "type": "ss", "server": "1.2.3.4", "port": 8388},
+                                   runner=Runner(), options={"speed": False, "geo": True, "unlock": True})
+            elapsed = time.monotonic() - t0
+        finally:
+            tester.tcp_ping, tester.http_latency, tester.fetch_node_geo, tester.check_unlocks = orig
+
+        self.assertLess(elapsed, 0.45, "geo 与 unlock 应并行执行")
+        self.assertFalse(res["unlock"]["chatgpt"])
+        self.assertFalse(res["unlock"]["claude"])
+        self.assertFalse(res["unlock"]["gemini"])
+        self.assertFalse(res["unlock"]["tiktok"])
+        self.assertTrue(res["unlock"]["netflix"])
+
+    @unittest.skipUnless(shutil.which("node"), "需要 node 才能执行前端脚本")
+    def test_matches_filter_multi_keyword_and_fields(self):
+        with open(TestFloatingTooltip.HTML, encoding="utf-8") as f:
+            src = f.read()
+        icons = src[src.index("const UNLOCK_ICONS ="):src.index("// 分档阈值")]
+        ip_lbl = src[src.index("const ipLabel ="):src.index("function ipTip(")]
+        fn = src[src.index("function matchesFilter("):src.index("function applyFilter(")]
+        script = (
+            f"{icons}\n{ip_lbl}\n{fn}\n"
+            "const r = {"
+            "  name: 'Tokyo-01', type: 'trojan', country: '日本 东京', ip: '146.19.163.75',"
+            "  ip_quality: {type: '家宽', proxy: false, risk: 'low', isp: 'xTom Japan', asn: 'AS3258'},"
+            "  unlock: {chatgpt: true, bilibili: true}"
+            "};"
+            "const out = ["
+            "  matchesFilter(r, '日本 家宽'),"
+            "  matchesFilter(r, 'openai 146.19'),"
+            "  matchesFilter(r, 'b站 xtom'),"
+            "  matchesFilter(r, '日本 美国')"
+            "];"
+            "process.stdout.write(JSON.stringify(out));"
+        )
+        out = subprocess.run(["node", "-e", script], capture_output=True, text=True, timeout=10, check=True).stdout
+        self.assertEqual(json.loads(out), [True, True, True, False])
+
+
+class TestSingleNodeRetestStream(unittest.TestCase):
+    """59：单节点复测通过 SSE 推送实时进度，前端原地更新不跳行。"""
+
+    def test_retest_streams_progress_events(self):
+        class _FakeRunner:
+            def __init__(self, nodes, **kw):
+                self.ports = {nodes[0]["name"]: 23456}
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        orig = webapp.MihomoRunner, tester.test_node, tester._run_speed
+        webapp.MihomoRunner = _FakeRunner
+        tester.test_node = lambda node, runner=None, options=None: {
+            "name": node["name"], "type": node["type"], "ok": True,
+            "tcp_ms": 15.0, "http_ms": 42.0, "country": "日本 东京",
+            "country_code": "JP", "ip": "146.19.163.75",
+            "ip_quality": {"type": "机房", "proxy": False, "risk": "mid", "isp": "xTom", "asn": "AS3258"},
+            "unlock": {"netflix": True}, "speed_mbps": None, "error": None,
+        }
+
+        def fake_run_speed(port, opts, live_cb=None, hint=None):
+            if live_cb:
+                live_cb(128.5)
+            return 135.2, "https://speed.example/bin"
+
+        tester._run_speed = fake_run_speed
+        srv = webapp._Server(("127.0.0.1", 0), webapp.Handler)
+        port = srv.server_address[1]
+        t = threading.Thread(target=srv.serve_forever, daemon=True)
+        t.start()
+        try:
+            conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+            conn.request(
+                "POST", "/api/retest",
+                body=json.dumps({
+                    "node": {"name": "JP-1", "type": "ss", "server": "1.2.3.4", "port": 8388},
+                    "speed_seconds": "5", "nospeed": "0", "unlock": "1",
+                }),
+                headers={"Host": f"127.0.0.1:{port}", "Content-Type": "application/json"},
+            )
+            resp = conn.getresponse()
+            body = resp.read().decode("utf-8")
+            conn.close()
+            self.assertEqual(resp.status, 200)
+            self.assertIn("text/event-stream", resp.getheader("Content-Type", ""))
+            self.assertIn("event: status", body)
+            self.assertIn("event: probe", body)
+            self.assertIn("event: speed_tick", body)
+            self.assertIn("128.5", body)
+            self.assertIn("event: done", body)
+            self.assertIn("135.2", body)
+        finally:
+            srv.shutdown()
+            srv.server_close()
+            webapp.MihomoRunner, tester.test_node, tester._run_speed = orig
+
+    def test_retest_updates_in_place_without_jumping(self):
+        with open(TestFloatingTooltip.HTML, encoding="utf-8") as f:
+            src = f.read()
+        block = src[src.index("else if (act === 'retest')"):src.index("// 浮层：点击按钮切换")]
+        self.assertIn("evt === 'speed_tick'", block)
+        self.assertIn("evt === 'probe'", block)
+        self.assertIn("keepPosition: true", block)
+        self.assertNotIn("refreshRanks()", block)
+        self.assertNotIn("pinTestingRow(", block)
+        back_block = src[src.index("$('backBtn').addEventListener"):src.index("/* ---------- 全局悬停提示")]
+        self.assertIn("retestCtrl.abort()", back_block)
+
+
+class TestResumeTest(unittest.TestCase):
+    """60：手动停止后「继续测速」仅测未完成节点，且已探活通过的节点跳过重复探活直接测速。"""
+
+    def test_test_all_skips_probe_for_pre_probed_nodes(self):
+        class Runner:
+            ports = {"n1": 10001, "n2": 10002}
+
+        probed_names = []
+        speed_calls = []
+        orig = tester.test_node, tester._run_speed
+
+        def fake_probe(node, runner=None, options=None):
+            probed_names.append(node["name"])
+            return {"name": node["name"], "ok": True, "tcp_ms": 10.0, "http_ms": 20.0, "speed_mbps": None}
+
+        def fake_speed(port, opts, live_cb=None, hint=None):
+            speed_calls.append(port)
+            return 88.8, "https://speed.example/bin"
+
+        tester.test_node = fake_probe
+        tester._run_speed = fake_speed
+        try:
+            nodes = [
+                {"name": "n1", "type": "ss", "server": "1.2.3.4", "port": 8388},
+                {"name": "n2", "type": "ss", "server": "1.2.3.5", "port": 8388},
+            ]
+            pre_probed = {
+                "n1": {"name": "n1", "ok": True, "tcp_ms": 5.0, "http_ms": 15.0, "country_code": "JP"},
+            }
+            out = tester.test_all(nodes, runner=Runner(), options={"speed": True, "iface": "eth0"},
+                                  concurrency=2, speed_concurrency=1, pre_probed=pre_probed)
+        finally:
+            tester.test_node, tester._run_speed = orig
+
+        by_name = {r["name"]: r for r in out}
+        self.assertEqual(probed_names, ["n2"], "已探活的 n1 不应再次探活")
+        self.assertCountEqual(speed_calls, [10001, 10002], "n1 和 n2 都应执行下载测速")
+        self.assertEqual(by_name["n1"]["speed_mbps"], 88.8)
+        self.assertEqual(by_name["n2"]["speed_mbps"], 88.8)
+
+    def test_run_test_stream_resumes_without_reloading_sub(self):
+        events = []
+
+        class _FakeRunner:
+            def __init__(self, nodes, **kw):
+                self.ports = {n["name"]: 21000 + i for i, n in enumerate(nodes)}
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        orig = webapp.load_nodes, webapp.MihomoRunner, tester.test_all, tester.local_bandwidth_mbps
+        webapp.load_nodes = lambda *a, **kw: (_ for _ in ()).throw(AssertionError("续测不应重新拉取订阅"))
+        webapp.MihomoRunner = _FakeRunner
+        captured = {}
+
+        def fake_test_all(nodes, runner=None, options=None, **kw):
+            captured["names"] = [n["name"] for n in nodes]
+            captured["pre_probed"] = kw.get("pre_probed")
+            return [{"name": "n1", "ok": True, "speed_mbps": 50.0, "_speed_tested": True}]
+
+        tester.test_all = fake_test_all
+        tester.local_bandwidth_mbps = lambda *a, **kw: (_ for _ in ()).throw(AssertionError("skip_baseline=True 时不应重测基线"))
+        try:
+            webapp.run_test_stream(
+                {
+                    "src": "https://sub.example.com/x",
+                    "resume_nodes": [{"name": "n1", "type": "ss", "server": "1.2.3.4", "port": 8388}],
+                    "probed_results": {"n1": {"name": "n1", "ok": True, "http_ms": 30.0}},
+                    "skip_baseline": True,
+                    "nospeed": "0",
+                },
+                lambda ev, data: events.append((ev, data)),
+            )
+        finally:
+            webapp.load_nodes, webapp.MihomoRunner, tester.test_all, tester.local_bandwidth_mbps = orig
+
+        ev_names = [e[0] for e in events]
+        self.assertNotIn("meta", ev_names)
+        self.assertIn("done", ev_names)
+        self.assertEqual(captured["names"], ["n1"])
+        self.assertIn("n1", captured["pre_probed"])
+
+    @unittest.skipUnless(shutil.which("node"), "需要 node 才能执行前端脚本")
+    def test_frontend_is_node_finished(self):
+        with open(TestFloatingTooltip.HTML, encoding="utf-8") as f:
+            src = f.read()
+        fn = src[src.index("function isNodeFinished("):src.index("function getPendingNodeNames(")]
+        script = (
+            f"{fn}\n"
+            "const out = ["
+            "  isNodeFinished(null, false),"
+            "  isNodeFinished({_done: false}, false),"
+            "  isNodeFinished({_done: true, ok: false}, false),"
+            "  isNodeFinished({_done: true, ok: true, _speed_tested: false, speed_mbps: null}, false),"
+            "  isNodeFinished({_done: true, ok: true, _speed_tested: true, speed_mbps: null}, false),"
+            "  isNodeFinished({_done: true, ok: true, _speed_tested: false, speed_mbps: 12.3}, false),"
+            "  isNodeFinished({_done: true, ok: true, _speed_tested: false, speed_mbps: null}, true)"
+            "];"
+            "process.stdout.write(JSON.stringify(out));"
+        )
+        out = subprocess.run(["node", "-e", script], capture_output=True, text=True, timeout=10, check=True).stdout
+        self.assertEqual(json.loads(out), [False, False, True, False, True, True, True])
+
+    def test_pre_probed_without_port_still_marks_speed_tested(self):
+        class Runner:
+            ports = {}
+            rejected = {"n1": "bad proxy"}
+
+        recorded = []
+        out = tester.test_all(
+            [{"name": "n1", "type": "ss", "server": "1.2.3.4", "port": 8388}],
+            runner=Runner(),
+            options={"speed": True, "iface": "eth0"},
+            progress_cb=lambda _n, r: recorded.append(dict(r)),
+            pre_probed={"n1": {"name": "n1", "ok": True, "http_ms": 15.0}},
+        )
+        self.assertTrue(out[0]["_speed_tested"])
+        self.assertEqual(len(recorded), 1)
+        self.assertIn("bad proxy", recorded[0]["error"])
+
+    def test_run_test_stream_cancel_while_waiting_lock(self):
+        from nodescope import iface as iface_mod
+
+        cancel = threading.Event()
+        orig_load = webapp.load_nodes
+        orig_fake = tester.check_fake_ip
+        orig_iface = iface_mod.detect_physical_iface
+        webapp.load_nodes = lambda *a, **kw: ([{"name": "n1", "type": "ss", "server": "1.2.3.4", "port": 8388}], [], {})
+        tester.check_fake_ip = lambda nodes: False
+        iface_mod.detect_physical_iface = lambda: None
+        webapp.TEST_LOCK.acquire()
+        threading.Timer(0.15, cancel.set).start()
+        try:
+            t0 = time.monotonic()
+            webapp.run_test_stream({"src": "x", "nospeed": "1"}, lambda *a: None, cancel_event=cancel)
+            elapsed = time.monotonic() - t0
+        finally:
+            webapp.TEST_LOCK.release()
+            webapp.load_nodes = orig_load
+            tester.check_fake_ip = orig_fake
+            iface_mod.detect_physical_iface = orig_iface
+        self.assertLess(elapsed, 1.0, "等待 TEST_LOCK 时取消应快速返回")
+
+    def test_copy_and_retest_rollback_guards(self):
+        with open(TestFloatingTooltip.HTML, encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("btn._origHtml", src)
+        self.assertIn("const prevRow = { ...row };", src)
+        self.assertIn("let probedOk = false;", src)
 
 
 if __name__ == "__main__":

@@ -110,13 +110,26 @@ class TestReportAndTester(unittest.TestCase):
 
     def test_ip_quality_classification(self):
         q = tester.ip_quality
-        # 住宅宽带、未被标记 → 低风险
-        self.assertEqual(q({"isp": "Comcast"}), {"type": "家宽", "proxy": False, "risk": "low", "isp": "Comcast", "asn": ""})
+        # 双源确认非机房的住宅宽带、未被标记 → 家宽 + 低风险
+        self.assertEqual(
+            q({"isp": "Comcast"}, extra={"risk": {"is_datacenter": False, "is_vpn": False, "is_proxy": False, "is_tor": False, "is_mobile": False}}),
+            {"type": "家宽", "proxy": False, "risk": "low", "isp": "Comcast", "asn": ""},
+        )
+        # 仅单源未标机房且未经过二次核验 → 降级为「未确认」+ 中风险，避免假家宽
+        self.assertEqual(
+            q({"isp": "Comcast"}),
+            {"type": "未确认", "proxy": False, "risk": "mid", "isp": "Comcast", "asn": ""},
+        )
+        # ip-api 漏标但组织/ASN 含机房特征 → 直接识别为「机房」
+        self.assertEqual(
+            q({"isp": "xTom Japan Corporation", "as": "AS3258 xTom Japan Corporation"}),
+            {"type": "机房", "proxy": False, "risk": "mid", "isp": "xTom Japan Corporation", "asn": "AS3258 xTom Japan Corporation"},
+        )
         # 移动网络优先于机房判定
         self.assertEqual(q({"mobile": True, "hosting": True})["type"], "移动")
-        # 机房未被标记 → 中；住宅被标记为代理 → 中
+        # 机房未被标记 → 中；真实家宽被标记为代理 → 中
         self.assertEqual(q({"hosting": True})["risk"], "mid")
-        self.assertEqual(q({"proxy": True})["risk"], "mid")
+        self.assertEqual(q({"proxy": True}, extra={"risk": {"is_datacenter": False}})["risk"], "mid")
         # 机房且被标记为代理/VPN → 高
         self.assertEqual(q({"hosting": True, "proxy": True})["risk"], "high")
         # isp 缺失时退回 org
@@ -143,11 +156,14 @@ class TestReportAndTester(unittest.TestCase):
         self.assertEqual(report.ip_label({"type": "机房", "proxy": True, "risk": "high"}), "机房·代理")
         tip = report.ip_tip({"type": "机房", "proxy": True, "risk": "high", "isp": "xTom", "asn": "AS3258"})
         self.assertEqual(tip, "风险高 | 已被标记为代理/VPN | xTom | AS3258")
+        tip_with_ip = report.ip_tip({"type": "机房", "proxy": True, "risk": "high", "isp": "xTom", "asn": "AS3258"}, ip="1.2.3.4")
+        self.assertEqual(tip_with_ip, "风险高 | 已被标记为代理/VPN | xTom | 1.2.3.4")
 
         results = [
-            {"name": "A", "type": "ss", "ok": True, "http_ms": 100,
-             "ip_quality": {"type": "家宽", "proxy": False, "risk": "low", "isp": "", "asn": ""}},
-            {"name": "B", "type": "ss", "ok": True, "http_ms": 120},
+            {"name": "A", "type": "ss", "ok": True, "http_ms": 100, "ip": "9.9.9.9",
+             "ip_quality": {"type": "家宽", "proxy": False, "risk": "low", "isp": "Comcast", "asn": "AS7922"}},
+            {"name": "B", "type": "ss", "ok": True, "http_ms": 120, "ip": "8.8.8.8",
+             "ip_quality": {"type": "机房", "proxy": True, "risk": "high", "isp": "xTom", "asn": "AS3258"}},
         ]
         with tempfile.NamedTemporaryFile(suffix=".html", delete=False) as f:
             temp_path = f.name
@@ -157,8 +173,10 @@ class TestReportAndTester(unittest.TestCase):
                 content = f.read()
             self.assertIn('data-k="ip"', content)
             self.assertIn("家宽", content)
+            self.assertIn("badge bad", content)
+            self.assertIn("9.9.9.9", content)
             # 没有 IP 质量数据的结果不出现 IP 列
-            report.export_html(results[1:], temp_path)
+            report.export_html([{"name": "C", "type": "ss", "ok": True, "http_ms": 120}], temp_path)
             with open(temp_path, encoding="utf-8") as f:
                 self.assertNotIn('data-k="ip"', f.read())
         finally:

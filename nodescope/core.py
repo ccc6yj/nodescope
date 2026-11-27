@@ -148,9 +148,13 @@ MAX_BAD_PROXY_RETRIES = 30
 
 
 def _port_free(port):
-    """端口是否空闲（可被 bind）。"""
+    """端口是否空闲（可被 bind）。Windows 下开启 SO_EXCLUSIVEADDRUSE，避免 SO_REUSEADDR 导致已占端口仍 bind 成功。"""
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        if sys.platform == "win32":
+            if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+                s.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        else:
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
             s.bind(("127.0.0.1", port))
             return True

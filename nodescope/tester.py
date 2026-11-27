@@ -96,35 +96,141 @@ def _format_geo_name(country, city, country_code):
     return country or city or loc
 
 
-def ip_quality(d):
-    """由 ip-api 的 mobile / hosting / proxy 字段归纳出口 IP 质量。
+# 本地机房/云厂商/IDC/骨干网特征识别：不误伤 NTT Communications (AS4713 OCN)、
+# SoftBank、Comcast、Charter、AT&T、Verizon、Chunghwa、PCCW(非 Global)、HGC、Singtel、
+# Lumen、Globe Telecom 等真实家宽运营商。
+_HOSTING_RE = re.compile(
+    r"(?:\b(?:"
+    r"hosting|hoster|datacenter|data[\s-]*center|vps|vds|colocation|colo|dedicated|"
+    r"cloud|servers?|cdn|vpn|proxy|bogon|anycast|transit|backbone|idc|bgp|"
+    r"greencloud|upcloud|cloudflare|cloudie|cloudsigma|clawcloud|cloudcone|"
+    r"amazon|aws|google\s+llc|google\s+cloud|microsoft|azure|alibaba|aliyun|tencent|"
+    r"huawei\s+cloud|oracle|ibm\s+cloud|softlayer|fastly|akamai|linode|digitalocean|"
+    r"vultr|choopa|hetzner|ovh|scaleway|kamatera|contabo|ionos|netcup|leaseweb|"
+    r"zenlayer|equinix|bunnyway|g-?core|datacamp|cdn77|packethub|datapacket|"
+    r"fly\.io|vercel|heroku|render|xtom|akari|kirino|misaka|nearoute|hytron|eons|"
+    r"dmit|bage|racknerd|colocrossing|m247|psychz|quadranet|cogent|"
+    r"hurricane\s+electric|sakura\s+internet|gmo\s+internet|conoha|idcf|hosthatch|"
+    r"frantech|buyvm|bandwagon(?:host)?|it7|clouvider|serverius|worldstream|tzulo|"
+    r"multacom|sharktech|cera\s*networks|dedipath|hostwinds|ramnode|incero|"
+    r"reliablesite|voxility|melbicom|cherry\s+servers|interserver|webnx|hostinger|"
+    r"namecheap|godaddy|kimsufi|soyoustart|selectel|aeza|stark\s+industries|"
+    r"pq\s+hosting|justhost|vdsina|layerstack|gigsgigs|alice\s+networks|liteserver|"
+    r"servarica|spartan\s+host|virmach|china\s+telecom\s+global|"
+    r"china\s+unicom\s+global|china\s+mobile\s+international|pccw\s+global|"
+    r"telstra\s+global|ntt\s+america|"
+    r"as2914|as6939|as174|as9009|as13335|as15169|as16509|as14061|as20473|"
+    r"as24940|as16276|as63949|as45102|as132203|as31898|as3258"
+    r")\b)",
+    re.IGNORECASE,
+)
 
-    type：移动 > 机房 > 家宽（三者都没标记时视为住宅宽带）。
-    risk：家宽/移动且未被标记为代理 → low；机房、或住宅却被标记为代理 → mid；
+_IPQUERY_CACHE = {}
+_IPQUERY_LOCK = threading.Lock()
+_IPQUERY_CACHE_MAX = 512
+
+
+def _is_hosting_org(*texts):
+    """根据 ISP/组织/ASN 名称或纯机房 ASN 判断是否属于机房/云/骨干网络。"""
+    combined = " ".join(str(t).strip() for t in texts if t)
+    return bool(combined and _HOSTING_RE.search(combined))
+
+
+def _fetch_ipquery_risk(ip, port, timeout=2.0):
+    """经节点向 api.ipquery.io 二次核验疑似家宽 IP，命中缓存时直接复用。"""
+    try:
+        ip_str = str(ipaddress.ip_address(str(ip).strip()))
+    except ValueError:
+        return None
+    with _IPQUERY_LOCK:
+        if ip_str in _IPQUERY_CACHE:
+            return _IPQUERY_CACHE[ip_str]
+    try:
+        resp = requests.get(
+            f"https://api.ipquery.io/{ip_str}?format=json",
+            proxies=_proxies(port),
+            timeout=(timeout, timeout),
+            headers={"User-Agent": UA},
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            if isinstance(data, dict) and isinstance(data.get("risk"), dict) and "is_datacenter" in data["risk"]:
+                with _IPQUERY_LOCK:
+                    if ip_str not in _IPQUERY_CACHE and len(_IPQUERY_CACHE) >= _IPQUERY_CACHE_MAX:
+                        _IPQUERY_CACHE.pop(next(iter(_IPQUERY_CACHE)))
+                    _IPQUERY_CACHE[ip_str] = data
+                return data
+    except Exception:  # noqa: BLE001 - 二次核验失败时降级为未确认，不中断节点探活
+        pass
+    return None
+
+
+def ip_quality(d, extra=None):
+    """综合 ip-api、本地机房特征与 api.ipquery.io 二次核验归纳出口 IP 质量。
+
+    type：移动 > 机房 > 家宽（须经双源核验非机房） > 未确认（单源未标机房但未复核）。
+    risk：家宽/移动且未被标记为代理 → low；机房、未确认、或家宽/移动却被标记为代理 → mid；
     机房且被标记为代理/VPN → high（AI 服务最容易风控的一类）。
     """
-    mobile, hosting, proxy = bool(d.get("mobile")), bool(d.get("hosting")), bool(d.get("proxy"))
-    ip_type = "移动" if mobile else "机房" if hosting else "家宽"
-    if hosting and proxy:
-        risk = "high"
-    elif hosting or proxy:
-        risk = "mid"
+    mobile = bool(d.get("mobile"))
+    hosting = bool(d.get("hosting"))
+    proxy = bool(d.get("proxy"))
+    isp = d.get("isp") or d.get("org") or ""
+    org = d.get("org") or ""
+    asn = d.get("as") or ""
+
+    verified = False
+    extra_isp = ""
+    extra_org = ""
+    extra_asn = ""
+    if isinstance(extra, dict):
+        risk_d = extra.get("risk") if isinstance(extra.get("risk"), dict) else None
+        isp_d = extra.get("isp") if isinstance(extra.get("isp"), dict) else {}
+        verified = bool(risk_d and "is_datacenter" in risk_d)
+        if risk_d:
+            mobile = mobile or bool(risk_d.get("is_mobile"))
+            hosting = hosting or bool(risk_d.get("is_datacenter"))
+            proxy = proxy or bool(
+                risk_d.get("is_vpn") or risk_d.get("is_proxy") or risk_d.get("is_tor")
+            )
+        extra_isp = isp_d.get("isp") or ""
+        extra_org = isp_d.get("org") or ""
+        extra_asn = isp_d.get("asn") or ""
+        if not isp:
+            isp = extra_isp or extra_org
+        if not asn:
+            asn = extra_asn
+
+    if not hosting and _is_hosting_org(isp, org, asn, extra_isp, extra_org, extra_asn):
+        hosting = True
+
+    if mobile:
+        ip_type = "移动"
+        risk = "mid" if proxy else "low"
+    elif hosting:
+        ip_type = "机房"
+        risk = "high" if proxy else "mid"
+    elif verified:
+        ip_type = "家宽"
+        risk = "mid" if proxy else "low"
     else:
-        risk = "low"
+        ip_type = "未确认"
+        risk = "mid"
     return {
         "type": ip_type,
         "proxy": proxy,
         "risk": risk,
-        "isp": d.get("isp") or d.get("org") or "",
-        "asn": d.get("as") or "",
+        "isp": isp,
+        "asn": asn,
     }
 
 
 def fetch_node_geo(port, timeout=3.5):
     """经节点查询落地 IP、精准城市与国家地区（标准中文输出，如「日本 东京」、「美国 洛杉矶」）。
 
-    主引擎 ip-api 同一次请求顺带返回 IP 质量（quality，见 ip_quality），不额外耗请求；
-    备用引擎 Cloudflare Trace 没有这类信息，quality 为 None。
+    主引擎 ip-api 同一次请求顺带返回 IP 质量（quality，见 ip_quality）；
+    仅对疑似家宽节点按需请求 api.ipquery.io 二次核验；
+    备用引擎 Cloudflare Trace 本身无 IP 质量字段，拿到出口 IP 后会按需查 api.ipquery.io 补齐。
     """
     proxies = _proxies(port)
 
@@ -132,7 +238,7 @@ def fetch_node_geo(port, timeout=3.5):
     try:
         url_ipapi = ("http://ip-api.com/json/?lang=zh-CN"
                      "&fields=status,country,countryCode,city,query,isp,org,as,mobile,proxy,hosting")
-        resp = requests.get(url_ipapi, proxies=proxies, timeout=(min(timeout, 2.0), min(timeout, 2.0)))
+        resp = requests.get(url_ipapi, proxies=proxies, timeout=(min(timeout, 2.5), min(timeout, 3.0)))
         if resp.status_code == 200:
             d = resp.json()
             if d.get("status") == "success":
@@ -140,8 +246,17 @@ def fetch_node_geo(port, timeout=3.5):
                 city = d.get("city") or ""
                 loc = (d.get("countryCode") or "").upper()
                 disp = _format_geo_name(country, city, loc)
-                return {"ip": d.get("query"), "country": disp, "country_code": loc,
-                        "quality": ip_quality(d)}
+                ip = d.get("query")
+                extra = None
+                if (
+                    ip
+                    and not d.get("mobile")
+                    and not d.get("hosting")
+                    and not _is_hosting_org(d.get("isp"), d.get("org"), d.get("as"))
+                ):
+                    extra = _fetch_ipquery_risk(ip, port, timeout=min(timeout, 2.0))
+                return {"ip": ip, "country": disp, "country_code": loc,
+                        "quality": ip_quality(d, extra=extra)}
     except Exception:
         pass
 
@@ -165,7 +280,12 @@ def fetch_node_geo(port, timeout=3.5):
             cname = COUNTRY_NAMES.get(loc, loc)
             city = COLO_CITIES.get(colo)
             disp = _format_geo_name(cname, city, loc)
-            return {"ip": ip, "country": disp, "country_code": loc, "quality": None}
+            quality = None
+            if ip:
+                extra = _fetch_ipquery_risk(ip, port, timeout=min(timeout, 2.5))
+                if extra:
+                    quality = ip_quality({}, extra=extra)
+            return {"ip": ip, "country": disp, "country_code": loc, "quality": quality}
     except Exception:
         pass
     return None
@@ -410,6 +530,22 @@ def check_unlocks(port, timeout=2.5, country_code=None):
                 results[key] = False
 
     return results
+
+
+def _apply_region_unlock_guard(unlock, country_code):
+    """Geo 与解锁并行完成后，补上与国家地区绑定的确定性禁区规则。"""
+    if not isinstance(unlock, dict) or not country_code:
+        return unlock
+    loc = str(country_code).upper()
+    if loc in ("HK", "CN", "RU", "IR", "KP"):
+        unlock["chatgpt"] = False
+    if loc in ("HK", "CN", "RU", "BY"):
+        unlock["claude"] = False
+    if loc in ("HK", "CN", "RU", "BY", "IR", "KP", "CU", "SY"):
+        unlock["gemini"] = False
+    if loc in ("HK", "CN"):
+        unlock["tiktok"] = False
+    return unlock
 
 
 def _proxies(port):
@@ -952,26 +1088,42 @@ def test_node(node, runner=None, options=None):
         if _cancelled(cancel):
             return result
 
-        # 落地 IP 与国家探测（轻量，消耗不到 1KB 流量）
-        loc_code = None
-        if opts.get("geo", True):
+        # 落地 IP 与解锁检测并行执行（互相独立，节省约 30%~40% 探活耗时）
+        want_geo = opts.get("geo", True)
+        want_unlock = opts.get("unlock", True)
+        geo = None
+        unlock = None
+        if want_geo and want_unlock:
+            def _run_geo():
+                return fetch_node_geo(port, timeout=min(timeout, 3.5))
+
+            def _run_unlock():
+                try:
+                    return check_unlocks(port, timeout=min(timeout, 2.5))
+                except Exception:  # noqa: BLE001 - 解锁检测失败不应影响节点可用性判断
+                    return None
+
+            with ThreadPoolExecutor(max_workers=2) as probe_pool:
+                fut_geo = probe_pool.submit(_run_geo)
+                fut_unlock = probe_pool.submit(_run_unlock)
+                geo = fut_geo.result()
+                unlock = fut_unlock.result()
+        elif want_geo:
             geo = fetch_node_geo(port, timeout=min(timeout, 3.5))
-            if geo:
-                result["ip"] = geo.get("ip")
-                result["country"] = geo.get("country")
-                loc_code = geo.get("country_code") or None
-                result["country_code"] = loc_code
-                result["ip_quality"] = geo.get("quality")
-
-        if _cancelled(cancel):
-            return result
-
-        # 流媒体与 AI 解锁探测（默认开启，可在 options 中传入 unlock=False 跳过）
-        if opts.get("unlock", True):
+        elif want_unlock:
             try:
-                result["unlock"] = check_unlocks(port, timeout=min(timeout, 2.5), country_code=loc_code)
-            except Exception:
-                result["unlock"] = None
+                unlock = check_unlocks(port, timeout=min(timeout, 2.5))
+            except Exception:  # noqa: BLE001 - 解锁检测失败不应影响节点可用性判断
+                unlock = None
+
+        loc_code = None
+        if geo:
+            result["ip"] = geo.get("ip")
+            result["country"] = geo.get("country")
+            loc_code = geo.get("country_code") or None
+            result["country_code"] = loc_code
+            result["ip_quality"] = geo.get("quality")
+        result["unlock"] = _apply_region_unlock_guard(unlock, loc_code)
 
         # 下载测速不在这里做：由 test_all 的测速队列统一调度（控制同时测速的节点数）
     elif ok_samples:
@@ -1064,12 +1216,14 @@ def _remember_source(source_by_cc, cc, hint, url):
 
 def test_all(nodes, runner=None, options=None, concurrency=8,
              progress_cb=None, speed_concurrency=1, cancel_event=None,
-             status_cb=None, on_speed_start=None, on_speed_tick=None):
+             status_cb=None, on_speed_start=None, on_speed_tick=None,
+             pre_probed=None):
     """并发测试所有节点：采用生产者-消费者流式流水线。
 
     探活线程池并发测试节点的延迟与可用性；
     节点一旦探活通过，立即放入测速工作队列，测速工作线程立刻对其执行下载测速并动态推送瞬时速度，
     实现边探活边流式测速，零等待卡顿。
+    pre_probed: 可选 {节点名: 已有探活结果}，续测时跳过探活直接送入测速队列。
     """
     import queue
     options = dict(options or {})
@@ -1157,6 +1311,12 @@ def test_all(nodes, runner=None, options=None, concurrency=8,
                         res["error"] = f"测速失败: {e}"
                     res["_speed_tested"] = True
                     _record(res)
+                else:
+                    reason = (getattr(runner, "rejected", None) or {}).get(name) if runner else None
+                    if not res.get("error"):
+                        res["error"] = f"节点配置被 mihomo 拒绝: {reason}" if reason else "缺少本地监听端口"
+                    res["_speed_tested"] = True
+                    _record(res)
             speed_q.task_done()
 
     # 启动测速消费者
@@ -1168,6 +1328,19 @@ def test_all(nodes, runner=None, options=None, concurrency=8,
 
     if status_cb:
         status_cb(f"正在进行流式测速（共 {len(nodes)} 个节点）…")
+
+    pre_probed_map = pre_probed if isinstance(pre_probed, dict) else {}
+    to_probe = []
+    for node in nodes:
+        node_name = node["name"]
+        if node_name in pre_probed_map:
+            res = dict(pre_probed_map[node_name])
+            with results_lock:
+                results[node_name] = res
+            if res.get("ok") and want_speed and not _cancelled(cancel_event):
+                speed_q.put(node)
+        else:
+            to_probe.append(node)
 
     # 探活生产者：并发探活，可用节点立刻送入测速队列
     def _probe_worker(node):
@@ -1184,27 +1357,28 @@ def test_all(nodes, runner=None, options=None, concurrency=8,
         if res.get("ok") and want_speed and not _cancelled(cancel_event):
             speed_q.put(node)
 
-    pool = ThreadPoolExecutor(max_workers=concurrency)
-    try:
-        futures = [pool.submit(_probe_worker, node) for node in nodes]
-        for f in as_completed(futures):
-            # 取出结果，避免异常被 as_completed 静默吞掉（历史 bug：进度条卡死无提示）
-            try:
-                f.result()
-            except Exception as e:  # noqa: BLE001 - 已由 _probe_worker 兜底，这里只做提示
-                print(f"[warn] 节点测试异常: {type(e).__name__}: {e}", file=sys.stderr)
-            if _cancelled(cancel_event):
-                for pending_f in futures:
-                    pending_f.cancel()
-                break
-    except BaseException:
-        # Ctrl+C（KeyboardInterrupt）等打断主线程时：必须在下面的 finally 之前置位取消，
-        # 线程池才会丢弃排队任务（否则要把剩余节点全部测完），测速线程也会收手
-        cancel_event.set()
-        raise
-    finally:
-        # 取消时不等待仍在跑的任务，否则「停止」要等最坏 timeout 才返回
-        _shutdown_pool(pool, cancel=_cancelled(cancel_event))
+    if to_probe:
+        pool = ThreadPoolExecutor(max_workers=concurrency)
+        try:
+            futures = [pool.submit(_probe_worker, node) for node in to_probe]
+            for f in as_completed(futures):
+                # 取出结果，避免异常被 as_completed 静默吞掉（历史 bug：进度条卡死无提示）
+                try:
+                    f.result()
+                except Exception as e:  # noqa: BLE001 - 已由 _probe_worker 兜底，这里只做提示
+                    print(f"[warn] 节点测试异常: {type(e).__name__}: {e}", file=sys.stderr)
+                if _cancelled(cancel_event):
+                    for pending_f in futures:
+                        pending_f.cancel()
+                    break
+        except BaseException:
+            # Ctrl+C（KeyboardInterrupt）等打断主线程时：必须在下面的 finally 之前置位取消，
+            # 线程池才会丢弃排队任务（否则要把剩余节点全部测完），测速线程也会收手
+            cancel_event.set()
+            raise
+        finally:
+            # 取消时不等待仍在跑的任务，否则「停止」要等最坏 timeout 才返回
+            _shutdown_pool(pool, cancel=_cancelled(cancel_event))
 
     # 探活结束，向测速队列发送终止哨兵并等待测速全部完成
     if want_speed:
